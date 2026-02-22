@@ -81,6 +81,9 @@ export default function Dashboard() {
   const [checkUpdatesLoading, setCheckUpdatesLoading] = useState(false);
   const [standupChatInput, setStandupChatInput] = useState('');
   const [deletingStandupId, setDeletingStandupId] = useState(null);
+  const [openclawData, setOpenclawData] = useState(null);
+  const [openclawLoading, setOpenclawLoading] = useState(false);
+  const [openclawSyncing, setOpenclawSyncing] = useState(false);
   const { speak, stop, speaking } = useEdgeTTS();
 
   const refreshStandup = () => {
@@ -245,6 +248,25 @@ export default function Dashboard() {
       .then(() => refreshStandup())
       .catch((e) => setError(e.message))
       .finally(() => setCheckUpdatesLoading(false));
+  };
+
+  const fetchOpenClawAgents = () => {
+    setOpenclawLoading(true);
+    api.openclawAgents()
+      .then(setOpenclawData)
+      .catch((e) => setError(e.message))
+      .finally(() => setOpenclawLoading(false));
+  };
+
+  const syncFromOpenClaw = (agentId) => {
+    setOpenclawSyncing(true);
+    api.openclawSync(agentId)
+      .then(() => {
+        fetchData();
+        fetchOpenClawAgents();
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setOpenclawSyncing(false));
   };
 
   const hierarchy = buildHierarchy(agents);
@@ -542,6 +564,79 @@ export default function Dashboard() {
             )}
           </div>
         </div>
+      </section>
+
+      {/* Pull from OpenClaw — sync agents from openclaw.json into DB */}
+      <section style={{ marginBottom: '2rem' }}>
+        <h2 style={{ fontSize: '1.25rem', marginBottom: '0.75rem' }}>Sync from OpenClaw</h2>
+        <p style={{ color: 'var(--muted)', marginBottom: '1rem', fontSize: '0.9rem' }}>
+          Load agents from <code style={{ background: 'var(--surface)', padding: '1px 4px', borderRadius: 4 }}>~/.openclaw/openclaw.json</code> and pull them into the agent-os database so the org chart and chat stay in sync.
+        </p>
+        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={fetchOpenClawAgents}
+            disabled={openclawLoading}
+            style={{ padding: '0.5rem 1rem', background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, cursor: openclawLoading ? 'not-allowed' : 'pointer', fontSize: '0.9rem' }}
+          >
+            {openclawLoading ? 'Loading…' : 'Load OpenClaw agents'}
+          </button>
+          {openclawData && openclawData.openclaw?.length > 0 && (
+            <button
+              type="button"
+              onClick={() => syncFromOpenClaw()}
+              disabled={openclawSyncing}
+              style={{ padding: '0.5rem 1rem', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6, cursor: openclawSyncing ? 'not-allowed' : 'pointer', fontSize: '0.9rem' }}
+            >
+              {openclawSyncing ? 'Syncing…' : 'Pull all into DB'}
+            </button>
+          )}
+        </div>
+        {openclawData && (
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+            {openclawData.configPath && (
+              <div style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem', color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}>
+                Config: {openclawData.configPath}
+              </div>
+            )}
+            {Array.isArray(openclawData.openclaw) && openclawData.openclaw.length === 0 ? (
+              <div style={{ padding: '1rem', color: 'var(--muted)', fontSize: '0.9rem' }}>No agents in OpenClaw config.</div>
+            ) : (
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                {(openclawData.openclaw || []).map((a) => {
+                  const inDb = (openclawData.db || []).some((d) => (d.openclaw_agent_id || d.id) === (a.id || ''));
+                  return (
+                    <li
+                      key={a.id || a.name}
+                      style={{
+                        padding: '0.6rem 0.75rem',
+                        borderBottom: '1px solid var(--border)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '0.5rem',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <span style={{ fontWeight: 500 }}>{a.name || a.id}</span>
+                      <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>{a.id}</span>
+                      {a.workspace && <span style={{ fontSize: '0.8rem', color: 'var(--muted)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }} title={a.workspace}>{a.workspace}</span>}
+                      <span style={{ fontSize: '0.8rem', color: inDb ? 'var(--accent)' : 'var(--muted)' }}>{inDb ? 'In DB' : 'Not in DB'}</span>
+                      <button
+                        type="button"
+                        onClick={() => syncFromOpenClaw(a.id)}
+                        disabled={openclawSyncing}
+                        style={{ padding: '0.25rem 0.6rem', background: inDb ? 'var(--surface)' : 'var(--accent)', color: inDb ? 'var(--text)' : '#fff', border: '1px solid var(--border)', borderRadius: 6, cursor: openclawSyncing ? 'not-allowed' : 'pointer', fontSize: '0.85rem' }}
+                      >
+                        {inDb ? 'Refresh' : 'Pull'}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
       </section>
 
       {/* Add agent (optional) */}

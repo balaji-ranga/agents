@@ -71,4 +71,7 @@ export const api = {
   // Cron: trigger standup collection + COO (agent-to-agent)
   cronRunStandup: () => post('/cron/run-standup', {}),
   cronProcessDelegations: () => post('/cron/process-delegations', {}),
+  // OpenClaw: list agents from config and sync to DB
+  openclawAgents: () => get('/openclaw/agents'),
+  openclawSync: (agentId) => post('/openclaw/sync', agentId ? { agent_id: agentId } : {}),
 };

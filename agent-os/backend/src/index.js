@@ -13,6 +13,7 @@ import workspaceRoutes from './routes/workspace.js';
 import agentsRoutes from './routes/agents.js';
 import standupsRoutes from './routes/standups.js';
 import cronRoutes from './routes/cron.js';
+import openclawRoutes from './routes/openclaw.js';
 import { initDb } from './db/schema.js';
 import { seedDefaultAgentsIfEmpty } from './db/seed-default-agents.js';
 import { runScheduledStandup } from './cron/standup.js';
@@ -40,6 +41,7 @@ apiRouter.use('/workspace', workspaceRoutes);
 apiRouter.use('/agents', agentsRoutes);
 apiRouter.use('/standups', standupsRoutes);
 apiRouter.use('/cron', cronRoutes);
+apiRouter.use('/openclaw', openclawRoutes);
 app.use('/api', apiRouter);
 
 // Also mount at root for VITE_API_URL without /api (e.g. http://127.0.0.1:3001)
@@ -47,6 +49,7 @@ app.use('/workspace', workspaceRoutes);
 app.use('/agents', agentsRoutes);
 app.use('/standups', standupsRoutes);
 app.use('/cron', cronRoutes);
+app.use('/openclaw', openclawRoutes);
 
 const standupSchedule = process.env.STANDUP_CRON_SCHEDULE || '0 9 * * *';
 if (cron.validate(standupSchedule)) {

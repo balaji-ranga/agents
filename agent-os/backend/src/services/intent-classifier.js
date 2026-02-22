@@ -5,8 +5,8 @@
  * Requires OPENAI_API_KEY. Returns null on error (caller decides fallback).
  */
 
-const API_URL = 'https://api.openai.com/v1/chat/completions';
-const DEFAULT_MODEL = 'gpt-4o-mini';
+const API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
+const DEFAULT_MODEL = process.env.OPENAI_DEFAULT_MODEL || 'gpt-4o-mini';
 
 function getApiKey() {
   const key = (process.env.OPENAI_API_KEY || '').trim();
