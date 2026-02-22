@@ -1,0 +1,21 @@
+{
+  "name": "agent-os-backend",
+  "version": "0.1.0",
+  "description": "Agent OS backend - OpenClaw workspace, gateway proxy, metadata",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "seed": "node scripts/seed-all.js",
+    "test:smoke": "node ../tests/api-smoke.js",
+    "test:full": "node ../tests/api-full.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "node-cron": "^3.0.3"
+  }
+}

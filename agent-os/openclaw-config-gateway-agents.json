@@ -1,0 +1,28 @@
+{
+  "gateway": {
+    "mode": "local",
+    "port": 18789,
+    "http": { "endpoints": { "chatCompletions": { "enabled": true } } }
+  },
+  "agents": {
+    "defaults": { "model": { "primary": "anthropic/claude-opus-4-6" } },
+    "list": [
+      {
+        "id": "bala",
+        "name": "Bala",
+        "default": true,
+        "workspace": "C:\\Users\\balaj\\.openclaw\\workspace"
+      },
+      {
+        "id": "balserve",
+        "name": "COO",
+        "workspace": "C:\\Users\\balaj\\.openclaw\\workspace-balserve"
+      },
+      {
+        "id": "techresearcher",
+        "name": "TechResearcher",
+        "workspace": "C:\\Users\\balaj\\.openclaw\\workspace-techresearcher"
+      }
+    ]
+  }
+}

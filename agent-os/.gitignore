@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Environment and secrets (never commit)
+.env
+.env.local
+.env.*.local
+*.env
+
+# Data and DB
+backend/data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Logs and build
+*.log
+npm-debug.log*
+dist/
+build/
+.vite/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Optional: OpenClaw local paths (if you symlink or copy)
+# .openclaw/
