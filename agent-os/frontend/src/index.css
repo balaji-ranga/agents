@@ -760,6 +760,38 @@ button {
   font-family: inherit;
   color: var(--text);
 }
+.kanban-cell-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  margin-top: 0.15rem;
+  padding: 0.15rem 0;
+  font-size: 0.62rem;
+  color: var(--muted);
+}
+.kanban-cell-pagination-btn {
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+  line-height: 1.2;
+  font-size: 0.75rem;
+}
+.kanban-cell-pagination-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.kanban-cell-pagination-label {
+  min-width: 2.5rem;
+  text-align: center;
+}
+.kanban-cell-pagination-count {
+  color: var(--muted);
+  font-size: 0.58rem;
+}
 
 .wf-step-io {
   margin-top: 0.35rem;

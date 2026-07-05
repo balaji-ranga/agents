@@ -3,9 +3,9 @@ import { api } from '../api';
 import { Link } from 'react-router-dom';
 import KanbanTaskDescription, { isCeoJobReviewTask, isWorkflowCeoApprovalTask, parseCeoReviewContext } from '../components/KanbanTaskDescription.jsx';
 import KanbanTaskArtifacts from '../components/KanbanTaskArtifacts.jsx';
-import KanbanTaskTooltip from '../components/KanbanTaskTooltip.jsx';
+import KanbanBoardCell from '../components/KanbanBoardCell.jsx';
 import { WorkflowIoDetailBlock } from '../components/WorkflowStepTooltip.jsx';
-import { formatLocalDateTime } from '../utils/formatDateTime.js';
+import { taskCreatedAtDisplay } from '../utils/formatDateTime.js';
 import ActionFeedbackBanner from '../components/ActionFeedbackBanner.jsx';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
 
@@ -57,6 +57,7 @@ export default function Kanban() {
   const [wfApprovalComment, setWfApprovalComment] = useState('');
   const [wfApproving, setWfApproving] = useState(false);
   const [drawerTab, setDrawerTab] = useState('details');
+  const [serverTimezone, setServerTimezone] = useState(null);
   const taskChatScrollRef = useRef(null);
 
   const toggleTaskSelection = (taskId, e) => {
@@ -95,7 +96,10 @@ export default function Kanban() {
       if (rangeFrom) params.from = rangeFrom;
       if (rangeTo) params.to = rangeTo;
     }
-    api.kanbanTasks(params).then((r) => setTasks(r.tasks || [])).catch(() => setTasks([]));
+    api.kanbanTasks(params).then((r) => {
+      setTasks(r.tasks || []);
+      if (r.server_timezone) setServerTimezone(r.server_timezone);
+    }).catch(() => setTasks([]));
   };
 
   useEffect(() => {
@@ -118,7 +122,10 @@ export default function Kanban() {
     setApproveSuccess(null);
     setReviewQueue(null);
     setDrawerTab('details');
-    api.kanbanTaskGet(selectedTask.id).then(setTaskDetail).catch(() => setTaskDetail(null));
+    api.kanbanTaskGet(selectedTask.id).then((detail) => {
+      setTaskDetail(detail);
+      if (detail.server_timezone) setServerTimezone(detail.server_timezone);
+    }).catch(() => setTaskDetail(null));
   }, [selectedTask?.id]);
 
   useEffect(() => {
@@ -606,7 +613,7 @@ export default function Kanban() {
               >
                 <div style={{ fontWeight: 600 }}>{t.title}</div>
                 <div style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 2 }}>
-                  {formatLocalDateTime(t.created_at)} · Click to review jobs &amp; approve
+                  {taskCreatedAtDisplay(t, serverTimezone)} · Click to review jobs &amp; approve
                 </div>
               </button>
             ))}
@@ -653,42 +660,19 @@ export default function Kanban() {
                       background: dropTargetStatus === status ? 'rgba(59, 130, 246, 0.1)' : undefined,
                     }}
                   >
-                    {(byAgentAndStatus[aid]?.[status] || []).map((t) => (
-                      <KanbanTaskTooltip key={t.id} task={t}>
-                        <div
-                          draggable
-                          onDragStart={(e) => handleDragStart(e, t)}
-                          onDragEnd={handleDragEnd}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => setSelectedTask(t)}
-                          onKeyDown={(e) => e.key === 'Enter' && setSelectedTask(t)}
-                          className="kanban-card-compact"
-                          style={{
-                            background: draggingTask?.id === t.id ? 'var(--border)' : undefined,
-                            cursor: draggingTask?.id === t.id ? 'grabbing' : 'grab',
-                            opacity: draggingTask?.id === t.id ? 0.8 : 1,
-                          }}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={selectedTaskIds.has(t.id)}
-                            onChange={(e) => toggleTaskSelection(t.id, e)}
-                            onClick={(e) => e.stopPropagation()}
-                            title="Select task"
-                          />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div className="kanban-card-title">{t.title || '(no title)'}</div>
-                            {isWorkflowCeoApprovalTask(t) && (
-                              <span style={{ fontSize: '0.6rem', color: '#ca8a04', fontWeight: 700 }}>WF CEO</span>
-                            )}
-                            {isCeoJobReviewTask(t) && (
-                              <span style={{ fontSize: '0.6rem', color: 'var(--accent)', fontWeight: 700 }}>CEO</span>
-                            )}
-                          </div>
-                        </div>
-                      </KanbanTaskTooltip>
-                    ))}
+                    {(byAgentAndStatus[aid]?.[status] || []).length > 0 && (
+                      <KanbanBoardCell
+                        cellKey={`${aid}-${status}`}
+                        tasks={byAgentAndStatus[aid]?.[status] || []}
+                        serverTimezone={serverTimezone}
+                        draggingTask={draggingTask}
+                        selectedTaskIds={selectedTaskIds}
+                        onSelectTask={setSelectedTask}
+                        onToggleSelection={toggleTaskSelection}
+                        onDragStart={handleDragStart}
+                        onDragEnd={handleDragEnd}
+                      />
+                    )}
                   </td>
                 ))}
               </tr>
@@ -767,6 +751,9 @@ export default function Kanban() {
                   {taskDetail?.assigned_agent_name || selectedTask.assigned_agent_name || 'Unassigned'} · {STATUS_LABELS[taskDetail?.status ?? selectedTask.status]}
                   {taskDetail?.artifact_count > 0 && (
                     <span> · {taskDetail.artifact_count} artifact{taskDetail.artifact_count === 1 ? '' : 's'}</span>
+                  )}
+                  {(taskDetail?.created_at || selectedTask.created_at) && (
+                    <span> · Created {taskCreatedAtDisplay(taskDetail || selectedTask, serverTimezone)}</span>
                   )}
                 </div>
                 {drawerTab === 'details' && selectedIsCeoReview && (

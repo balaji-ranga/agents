@@ -8,6 +8,7 @@ import { getDb } from '../db/schema.js';
 import * as openclaw from '../gateway/openclaw.js';
 import { resolveKanbanTaskArtifacts } from '../services/kanban-artifacts.js';
 import { parseAgentWorkflowMeta } from '../services/agent-workflow-kanban.js';
+import { formatServerDateTime, getServerTimezone } from '../utils/format-datetime.js';
 
 const router = Router();
 const VALID_STATUSES = ['open', 'awaiting_confirmation', 'in_progress', 'completed', 'failed'];
@@ -96,7 +97,13 @@ router.get('/tasks', (req, res) => {
     params.push(limit);
 
     const rows = db().prepare(sql).all(...params);
-    res.json({ tasks: rows });
+    const server_timezone = getServerTimezone();
+    const tasks = rows.map((row) => ({
+      ...row,
+      created_at_display: formatServerDateTime(row.created_at),
+      updated_at_display: row.updated_at ? formatServerDateTime(row.updated_at) : null,
+    }));
+    res.json({ tasks, server_timezone });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -154,6 +161,9 @@ router.get('/tasks/:id', (req, res) => {
     const { input: workflow_step_input, output: workflow_step_output } = resolveWorkflowStepIo(task.description);
     res.json({
       ...task,
+      created_at_display: formatServerDateTime(task.created_at),
+      updated_at_display: task.updated_at ? formatServerDateTime(task.updated_at) : null,
+      server_timezone: getServerTimezone(),
       messages,
       delegation_prompt,
       delegation_response,

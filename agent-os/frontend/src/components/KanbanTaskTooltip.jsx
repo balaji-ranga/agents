@@ -1,11 +1,13 @@
 import HoverFixedTooltip from './HoverFixedTooltip.jsx';
+import { taskCreatedAtDisplay } from '../utils/formatDateTime.js';
 
 /** Hover tooltip showing full task title + description preview. */
-export default function KanbanTaskTooltip({ task, children }) {
+export default function KanbanTaskTooltip({ task, serverTimezone, children }) {
   if (!task) return children;
 
   const desc = (task.description || '').trim();
   const preview = desc.length > 600 ? `${desc.slice(0, 600)}…` : desc;
+  const createdLabel = taskCreatedAtDisplay(task, serverTimezone);
 
   const content = (
     <>
@@ -13,8 +15,8 @@ export default function KanbanTaskTooltip({ task, children }) {
       {task.status && (
         <div className="kanban-task-tooltip-meta">Status: {task.status.replace(/_/g, ' ')}</div>
       )}
-      {task.created_at && (
-        <div className="kanban-task-tooltip-meta">Created: {new Date(task.created_at).toLocaleString()}</div>
+      {createdLabel && createdLabel !== '—' && (
+        <div className="kanban-task-tooltip-meta">Created: {createdLabel}</div>
       )}
       {preview ? (
         <pre className="kanban-task-tooltip-body">{preview}</pre>
