@@ -1,2 +1,12 @@
-My name is Ed Donner. I'm an entrepreneur, software engineer and data scientist. I'm originally from London, England, but I moved to NYC in 2000.
-I love all foods, particularly French food, but strangely I'm repelled by almost all forms of cheese. I'm not allergic, I just hate the taste! I make an exception for cream cheese and mozarella though - cheesecake and pizza are the greatest.
+My name is Balaji Ranganathan and I am a Senior industry leader with 18+ years of extensive experience in Banking , Financial Technology & Cloud domain covering Hybrid Multi Cloud Strategy for banking sector, Client Lifecyle Management, Origination, Sales Enablement and Analytics Tech. 
+
+I have performed several senior technologist roles for top banks across the markets and possess in-depth knowledge of Financial Cloud enablement, Core banking, Origination workflows, CRM , Financial Analytics, complex entitlements engine. Balaji has been instrumental in establishing innovation-based, customer-centric culture underpinned by strong solution engineering and technical architecture
+
+As Principal Architect/Head of Architecture for Cloud, I have played critical role in ideating and setting up banks Hybrid Multi Cloud Strategy & implementing a Cloud Agnostic Multi-cloud platform for enabling business workloads to run and operate securely and resilient on cloud. Some of the unique success stories of our bank’s solutions on cloud is also referred in case studies.
+https://aws.amazon.com/solutions/case-studies/standard-chartered-case-study/
+
+I have championed, build and adoption of best of the breed technical products & frameworks in areas of Cloud, Cyber Security, distributed computing, Virtual Reality, Augmented and Artificial Intelligence, data engineering, knowledge-graphs, in-memory caching, API platforms and services deployment & cyber security.
+Part of my job roles, i have got the opportunity to travel and meet various clients, partners and stakeholders across europe, US, milddeeast UAE, APAC, giving me thorough international experience.
+
+On Personel front, i am married , father of 2 kids and passionate towards learning new and emergin tech , Video games and cricket.
+My interest towards games and gameing tech also pushed me to take Indie game developer training and professional diploma.

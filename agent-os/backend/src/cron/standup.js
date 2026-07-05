@@ -1,13 +1,15 @@
 /**
  * Standup cron: create standup, collect status from agents (COO → agents via OpenClaw), run COO summarization.
  * Call runScheduledStandup() from node-cron or POST /cron/run-standup.
+ * Wraps prompts with session history + MEMORY instruction so agents get context before responding.
  */
 
 import { getDb } from '../db/schema.js';
 import * as openclaw from '../gateway/openclaw.js';
 import { runCooSummarization } from '../services/coo.js';
+import { getPromptWithMemoryInjected } from '../services/delegation-queue.js';
 
-const STANDUP_PROMPT =
+const STANDUP_PROMPT_BASE =
   "The COO is collecting today's standup. What is your status and a brief summary? Reply in 2–4 sentences: what you did, any blockers, and next steps.";
 
 function db() {
@@ -33,14 +35,16 @@ export async function runScheduledStandup() {
   const standup = db().prepare('SELECT * FROM standups ORDER BY id DESC LIMIT 1').get();
   if (!standup) return { standup: null, error: 'Failed to create standup' };
 
-  const sessionUser = openclaw.sessionUserFor('cron', 'standup-collect');
-
   for (const agent of delegated) {
     const openclawId = agent.openclaw_agent_id || 'main';
+    const sessionUser = `standup-${standup.id}-${agent.id}`;
+    const sessionKeyLine = `\n\nYour session key for this run is ${openclaw.sessionKeyFor(openclawId, sessionUser)}. Use this exact sessionKey when calling sessions_history. If sessions_history returns empty, the conversation is in the messages above—proceed with those.`;
+    let prompt = await getPromptWithMemoryInjected(agent.id, STANDUP_PROMPT_BASE);
+    prompt = prompt + sessionKeyLine;
     try {
       const { content } = await openclaw.chatCompletions(
         openclawId,
-        [{ role: 'user', content: STANDUP_PROMPT }],
+        [{ role: 'user', content: prompt }],
         sessionUser,
         false
       );

@@ -14,8 +14,8 @@ const WORKSPACE_PATH = process.env.OPENCLAW_WORKSPACE_BALSERVE || join(homedir, 
 const TEMPLATES_DIR = join(__dirname, '..', '..', 'openclaw-workspace-templates', 'balserve');
 
 function readTemplate(name) {
-  const path = join(TEMPLATES_DIR, name);
-  if (existsSync(path)) return readFileSync(path, 'utf8');
+  const p = join(TEMPLATES_DIR, name);
+  if (existsSync(p)) return readFileSync(p, 'utf8');
   return null;
 }
 
@@ -62,8 +62,18 @@ Session key for an agent's main chat: \`agent::<agentId>:main\` (e.g. \`agent::t
 
 if (!existsSync(WORKSPACE_PATH)) mkdirSync(WORKSPACE_PATH, { recursive: true });
 
+const MEMORY_MD = readTemplate('MEMORY.md') || `# MEMORY — BalServe (COO)
+
+Recent completions (topic/request summary and date). Keep only the last 20–30 entries.
+
+- (Add lines here as you complete tasks; oldest entries can be removed when the list grows.)
+`;
+
 writeFileSync(join(WORKSPACE_PATH, 'SOUL.md'), SOUL_MD, 'utf8');
 writeFileSync(join(WORKSPACE_PATH, 'AGENTS.md'), AGENTS_MD, 'utf8');
+if (!existsSync(join(WORKSPACE_PATH, 'MEMORY.md'))) {
+  writeFileSync(join(WORKSPACE_PATH, 'MEMORY.md'), MEMORY_MD, 'utf8');
+}
 
 console.log('COO workspace updated:', WORKSPACE_PATH);
-console.log('  SOUL.md, AGENTS.md written (other agents and sessions_send documented).');
+console.log('  SOUL.md, AGENTS.md, MEMORY.md (if new) written.');

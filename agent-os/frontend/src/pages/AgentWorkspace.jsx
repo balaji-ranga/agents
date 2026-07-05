@@ -11,8 +11,19 @@ export default function AgentWorkspace() {
   const [selected, setSelected] = useState('soul');
   const [content, setContent] = useState('');
   const [saving, setSaving] = useState(false);
+  const [clearingSessions, setClearingSessions] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  const clearSessions = () => {
+    if (!window.confirm('Clear all OpenClaw sessions for this agent? Chat and task session history will be reset.')) return;
+    setClearingSessions(true);
+    setError(null);
+    api.agentSessionsClear(agentId)
+      .then(() => setError(null))
+      .catch((e) => setError(e.message))
+      .finally(() => setClearingSessions(false));
+  };
 
   useEffect(() => {
     api.agentGet(agentId)
@@ -60,7 +71,7 @@ export default function AgentWorkspace() {
       </div>
       <h1 style={{ marginTop: 0 }}>Workspace — {agent?.name || agentId}</h1>
       <p style={{ color: 'var(--muted)', marginBottom: '1rem' }}>
-        Edit SOUL.md, AGENTS.md, MEMORY.md for this agent’s OpenClaw workspace. Backups are created on save.
+        Edit SOUL.md, AGENTS.md, MEMORY.md for this agent’s OpenClaw workspace. Saves write directly to these files (same files the OpenClaw gateway uses). Backups are created on save.
         {agent && !agent.workspace_path && ' (Using default workspace; set workspace_path on this agent for a separate folder.)'}
       </p>
 
@@ -107,22 +118,37 @@ export default function AgentWorkspace() {
               }}
               spellCheck={false}
             />
-            <button
-              type="button"
-              onClick={save}
-              disabled={saving}
-              style={{
-                marginTop: '0.75rem',
-                padding: '0.5rem 1.25rem',
-                background: saving ? 'var(--muted)' : 'var(--accent)',
-                border: 'none',
-                borderRadius: 6,
-                color: '#fff',
-                alignSelf: 'flex-start',
-              }}
-            >
-              {saving ? 'Saving…' : 'Save'}
-            </button>
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={save}
+                disabled={saving}
+                style={{
+                  padding: '0.5rem 1.25rem',
+                  background: saving ? 'var(--muted)' : 'var(--accent)',
+                  border: 'none',
+                  borderRadius: 6,
+                  color: '#fff',
+                }}
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                type="button"
+                onClick={clearSessions}
+                disabled={clearingSessions}
+                title="Clear OpenClaw session history for this agent"
+                style={{
+                  padding: '0.5rem 1.25rem',
+                  background: clearingSessions ? 'var(--muted)' : 'var(--surface)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 6,
+                  color: 'var(--text)',
+                }}
+              >
+                {clearingSessions ? 'Clearing…' : 'Clear sessions'}
+              </button>
+            </div>
           </>
         )}
       </div>

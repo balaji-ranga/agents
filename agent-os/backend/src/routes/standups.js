@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { getDb } from '../db/schema.js';
 import { runCooSummarization } from '../services/coo.js';
 import * as openclaw from '../gateway/openclaw.js';
-import { scheduleCeoRequestViaOpenClawCron, enqueueGetWorkFromTeam, enqueueDelegationTask, postCallbackForRequestId } from '../services/delegation-queue.js';
+import { scheduleCeoRequestViaOpenClawCron, enqueueGetWorkFromTeam, enqueueDelegationTask, postCallbackForRequestId, appendToAgentMemory, extractTaskSummaryFromPrompt, appendDelegationResponseToAgentChat } from '../services/delegation-queue.js';
+import { getLastIntentDebug } from '../services/intent-classifier.js';
 
 const router = Router();
 const STANDUP_CHAT_SESSION = 'agent-os-standup-ceo';
@@ -21,7 +22,7 @@ router.get('/', (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 50, 100);
     const rows = db()
       .prepare(
-        'SELECT id, scheduled_at, status, coo_summary, ceo_summary, source, created_at FROM standups ORDER BY scheduled_at DESC LIMIT ?'
+        'SELECT id, scheduled_at, status, coo_summary, ceo_summary, source, title, outcomes, created_at FROM standups ORDER BY scheduled_at DESC LIMIT ?'
       )
       .all(limit);
     res.json(rows);
@@ -63,6 +64,9 @@ router.post('/cron-callback', (req, res) => {
     db()
       .prepare('UPDATE agent_delegation_tasks SET status = ?, response_content = ?, completed_at = ? WHERE id = ?')
       .run('completed', responseContent, now, taskId);
+    appendDelegationResponseToAgentChat(agent_id, extractTaskSummaryFromPrompt(task.prompt), responseContent);
+    const summary = extractTaskSummaryFromPrompt(task.prompt);
+    appendToAgentMemory(agent_id, summary).catch(() => {});
     postCallbackForRequestId(request_id);
     res.status(200).json({ ok: true });
   } catch (e) {
@@ -70,7 +74,45 @@ router.post('/cron-callback', (req, res) => {
   }
 });
 
-// Get one standup with responses and messages (for interactive standup)
+// Notifications: recent completed delegation tasks (agent responded). For bell icon and Kanban/Chat links.
+router.get('/notifications', (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 20, 50);
+    const rows = db()
+      .prepare(
+        `SELECT t.id, t.standup_id, t.to_agent_id, t.prompt, t.response_content, t.completed_at, t.request_id,
+         s.scheduled_at, s.title, s.source AS standup_source,
+         a.name AS agent_name,
+         k.id AS kanban_task_id
+         FROM agent_delegation_tasks t
+         JOIN standups s ON s.id = t.standup_id
+         LEFT JOIN agents a ON a.id = t.to_agent_id
+         LEFT JOIN kanban_tasks k ON k.agent_delegation_task_id = t.id
+         WHERE t.status = 'completed' AND t.response_content IS NOT NULL AND t.response_content != ''
+         ORDER BY t.completed_at DESC LIMIT ?`
+      )
+      .all(limit);
+    const notifications = rows.map((r) => ({
+      id: r.id,
+      standup_id: r.standup_id,
+      to_agent_id: r.to_agent_id,
+      agent_name: r.agent_name || r.to_agent_id,
+      completed_at: r.completed_at,
+      scheduled_at: r.scheduled_at,
+      standup_title: r.title,
+      standup_source: r.standup_source,
+      kanban_task_id: r.kanban_task_id,
+      is_job_pipeline: r.standup_source === 'job_pipeline' || String(r.prompt || '').includes('[job_pipeline:'),
+      prompt_snippet: (r.prompt || '').trim().slice(0, 120),
+      response_snippet: (r.response_content || '').trim().slice(0, 150),
+    }));
+    res.json({ notifications });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get one standup with responses and messages (for interactive standup). ?delegation_tasks=1 adds latest tasks.
 router.get('/:id', (req, res) => {
   try {
     const standup = db().prepare('SELECT * FROM standups WHERE id = ?').get(req.params.id);
@@ -84,7 +126,40 @@ router.get('/:id', (req, res) => {
     try {
       messages = db().prepare('SELECT id, role, content, created_at FROM standup_messages WHERE standup_id = ? ORDER BY created_at').all(standup.id);
     } catch (_) {}
-    res.json({ ...standup, responses, messages });
+    const out = { ...standup, responses, messages };
+    if (req.query.kanban_summary === '1') {
+      try {
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const rows = db()
+          .prepare(
+            `SELECT assigned_agent_id, status, COUNT(*) AS count FROM kanban_tasks
+             WHERE created_at >= ? AND assigned_agent_id IS NOT NULL GROUP BY assigned_agent_id, status`
+          )
+          .all(since);
+        const byAgent = {};
+        for (const r of rows) {
+          if (!byAgent[r.assigned_agent_id]) byAgent[r.assigned_agent_id] = { open: 0, awaiting_confirmation: 0, in_progress: 0, completed: 0, failed: 0 };
+          if (['open', 'awaiting_confirmation', 'in_progress', 'completed', 'failed'].includes(r.status)) byAgent[r.assigned_agent_id][r.status] = r.count;
+        }
+        out.kanban_summary = { since, by_agent: byAgent };
+      } catch (_) {}
+    }
+    if (req.query.delegation_tasks === '1') {
+      const latest = db()
+        .prepare('SELECT request_id FROM agent_delegation_tasks WHERE standup_id = ? ORDER BY id DESC LIMIT 1')
+        .get(standup.id);
+      if (latest) {
+        out.delegation_tasks = db()
+          .prepare(
+            'SELECT id, to_agent_id, prompt, status FROM agent_delegation_tasks WHERE standup_id = ? AND request_id = ? ORDER BY id'
+          )
+          .all(standup.id, latest.request_id);
+        out.delegation_request_id = latest.request_id;
+      } else {
+        out.delegation_tasks = [];
+      }
+    }
+    res.json(out);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -93,12 +168,14 @@ router.get('/:id', (req, res) => {
 // Create standup
 router.post('/', (req, res) => {
   try {
-    const { scheduled_at, status, source } = req.body;
+    const { scheduled_at, status, source, title, outcomes } = req.body;
     const at = scheduled_at || new Date().toISOString();
     const src = source || 'manual';
+    const titleStr = typeof title === 'string' ? title.trim() || null : null;
+    const outcomesStr = typeof outcomes === 'string' ? outcomes.trim() || null : null;
     db()
-      .prepare('INSERT INTO standups (scheduled_at, status, source) VALUES (?, ?, ?)')
-      .run(at, status || 'scheduled', src);
+      .prepare('INSERT INTO standups (scheduled_at, status, source, title, outcomes) VALUES (?, ?, ?, ?, ?)')
+      .run(at, status || 'scheduled', src, titleStr, outcomesStr);
     const row = db().prepare('SELECT * FROM standups ORDER BY id DESC LIMIT 1').get();
     res.status(201).json(row);
   } catch (e) {
@@ -250,7 +327,10 @@ router.post('/:id/messages', async (req, res) => {
       db().prepare('INSERT INTO standup_messages (standup_id, role, content) VALUES (?, ?, ?)').run(standupId, 'coo', cooReply);
       const messages = db().prepare('SELECT id, role, content, created_at FROM standup_messages WHERE standup_id = ? ORDER BY created_at').all(standupId);
       const updated = db().prepare('SELECT * FROM standups WHERE id = ?').get(standupId);
-      return res.status(201).json({ standup: updated, messages, coo_reply: cooReply });
+      const payload = { standup: updated, messages, coo_reply: cooReply };
+      const intentDebug = getLastIntentDebug();
+      if (intentDebug) payload.intent_debug = intentDebug;
+      return res.status(201).json(payload);
     }
 
     const cooReply = `I've asked ${result.agentNames.join(' and ')} to look into this. You'll see their responses here when ready.${result.pendingCount > 0 ? ' Some tasks are queued; click Check for updates to fetch responses.' : ''}`;
@@ -258,7 +338,10 @@ router.post('/:id/messages', async (req, res) => {
 
     const messages = db().prepare('SELECT id, role, content, created_at FROM standup_messages WHERE standup_id = ? ORDER BY created_at').all(standupId);
     const updated = db().prepare('SELECT * FROM standups WHERE id = ?').get(standupId);
-    return res.status(201).json({ standup: updated, messages, coo_reply: cooReply });
+    const payload = { standup: updated, messages, coo_reply: cooReply, tasks_queued: result.count, request_id: result.requestId, kanban_task_ids: result.kanbanTaskIds };
+    const intentDebug = getLastIntentDebug();
+    if (intentDebug) payload.intent_debug = intentDebug;
+    return res.status(201).json(payload);
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
@@ -277,19 +360,44 @@ router.post('/:id/approve', (req, res) => {
   }
 });
 
+// Delete all standups and related data (must be before /:id)
+// Order: clear kanban_tasks FKs first (they reference standups and agent_delegation_tasks), then delete children of standups, then standups.
+router.delete('/all', (req, res) => {
+  try {
+    const ids = db().prepare('SELECT id FROM standups').all().map((r) => r.id);
+    if (ids.length === 0) return res.status(200).json({ deleted: 0 });
+    db().prepare('UPDATE kanban_tasks SET standup_id = NULL, agent_delegation_task_id = NULL WHERE standup_id IS NOT NULL OR agent_delegation_task_id IS NOT NULL').run();
+    for (const id of ids) {
+      const requestIds = db().prepare('SELECT DISTINCT request_id FROM agent_delegation_tasks WHERE standup_id = ?').all(id).map((r) => r.request_id);
+      for (const rid of requestIds) {
+        db().prepare('DELETE FROM delegation_callbacks WHERE request_id = ?').run(rid);
+      }
+      db().prepare('DELETE FROM agent_delegation_tasks WHERE standup_id = ?').run(id);
+      db().prepare('DELETE FROM standup_messages WHERE standup_id = ?').run(id);
+      db().prepare('DELETE FROM standup_responses WHERE standup_id = ?').run(id);
+    }
+    db().prepare('DELETE FROM standups').run();
+    res.status(200).json({ deleted: ids.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Delete standup and related data
+// Order: clear kanban_tasks FKs first (they reference standup_id and agent_delegation_task_id), then delete children, then standup.
 router.delete('/:id', (req, res) => {
   try {
     const standup = db().prepare('SELECT * FROM standups WHERE id = ?').get(req.params.id);
     if (!standup) return res.status(404).json({ error: 'Standup not found' });
     const id = standup.id;
+    db().prepare('UPDATE kanban_tasks SET standup_id = NULL, agent_delegation_task_id = NULL WHERE standup_id = ? OR agent_delegation_task_id IN (SELECT id FROM agent_delegation_tasks WHERE standup_id = ?)').run(id, id);
     const requestIds = db().prepare('SELECT DISTINCT request_id FROM agent_delegation_tasks WHERE standup_id = ?').all(id).map((r) => r.request_id);
-    db().prepare('DELETE FROM standup_messages WHERE standup_id = ?').run(id);
-    db().prepare('DELETE FROM standup_responses WHERE standup_id = ?').run(id);
-    db().prepare('DELETE FROM agent_delegation_tasks WHERE standup_id = ?').run(id);
     for (const rid of requestIds) {
       db().prepare('DELETE FROM delegation_callbacks WHERE request_id = ?').run(rid);
     }
+    db().prepare('DELETE FROM agent_delegation_tasks WHERE standup_id = ?').run(id);
+    db().prepare('DELETE FROM standup_messages WHERE standup_id = ?').run(id);
+    db().prepare('DELETE FROM standup_responses WHERE standup_id = ?').run(id);
     db().prepare('DELETE FROM standups WHERE id = ?').run(id);
     res.status(204).send();
   } catch (e) {

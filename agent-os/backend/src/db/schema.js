@@ -109,6 +109,62 @@ export function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_delegation_tasks_status ON agent_delegation_tasks(status);
     CREATE INDEX IF NOT EXISTS idx_delegation_tasks_request ON agent_delegation_tasks(request_id);
+
+    CREATE TABLE IF NOT EXISTS content_tool_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tool_name TEXT NOT NULL,
+      source TEXT,
+      request_payload TEXT,
+      response_payload TEXT,
+      status TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_content_tool_logs_created ON content_tool_logs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_content_tool_logs_tool ON content_tool_logs(tool_name);
+
+    CREATE TABLE IF NOT EXISTS content_tools_meta (
+      name TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      method TEXT DEFAULT 'POST',
+      purpose TEXT DEFAULT '',
+      model_used TEXT DEFAULT '',
+      enabled INTEGER DEFAULT 1,
+      is_builtin INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      auth_header TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_content_tools_meta_enabled ON content_tools_meta(enabled);
+
+    CREATE TABLE IF NOT EXISTS kanban_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      status TEXT DEFAULT 'open',
+      assigned_agent_id TEXT,
+      created_by TEXT DEFAULT 'user',
+      standup_id INTEGER,
+      agent_delegation_task_id INTEGER,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      due_date TEXT,
+      FOREIGN KEY (assigned_agent_id) REFERENCES agents(id),
+      FOREIGN KEY (standup_id) REFERENCES standups(id),
+      FOREIGN KEY (agent_delegation_task_id) REFERENCES agent_delegation_tasks(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_kanban_tasks_status ON kanban_tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_kanban_tasks_assigned ON kanban_tasks(assigned_agent_id);
+    CREATE INDEX IF NOT EXISTS idx_kanban_tasks_created ON kanban_tasks(created_at);
+
+    CREATE TABLE IF NOT EXISTS task_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (task_id) REFERENCES kanban_tasks(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id);
   `);
 
   try {
@@ -116,6 +172,12 @@ export function initDb() {
   } catch (_) {}
   try {
     _db.exec(`ALTER TABLE standups ADD COLUMN approved_at TEXT`);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE standups ADD COLUMN title TEXT`);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE standups ADD COLUMN outcomes TEXT`);
   } catch (_) {}
   try {
     _db.exec(`CREATE TABLE standup_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, standup_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY (standup_id) REFERENCES standups(id))`);
@@ -134,6 +196,220 @@ export function initDb() {
   } catch (_) {}
   try {
     _db.exec(`CREATE TABLE delegation_callbacks (request_id TEXT PRIMARY KEY, posted_at TEXT DEFAULT (datetime('now')))`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE TABLE content_tool_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, tool_name TEXT NOT NULL, source TEXT, request_payload TEXT, response_payload TEXT, status TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_content_tool_logs_created ON content_tool_logs(created_at DESC)`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_content_tool_logs_tool ON content_tool_logs(tool_name)`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE TABLE content_tools_meta (name TEXT PRIMARY KEY, display_name TEXT NOT NULL, endpoint TEXT NOT NULL, method TEXT DEFAULT 'POST', purpose TEXT DEFAULT '', model_used TEXT DEFAULT '', enabled INTEGER DEFAULT 1, is_builtin INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), auth_header TEXT DEFAULT '')`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_content_tools_meta_enabled ON content_tools_meta(enabled)`);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE content_tools_meta ADD COLUMN auth_header TEXT DEFAULT ''`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE TABLE kanban_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', assigned_agent_id TEXT, created_by TEXT DEFAULT 'user', standup_id INTEGER, agent_delegation_task_id INTEGER, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), due_date TEXT, FOREIGN KEY (assigned_agent_id) REFERENCES agents(id), FOREIGN KEY (standup_id) REFERENCES standups(id), FOREIGN KEY (agent_delegation_task_id) REFERENCES agent_delegation_tasks(id))`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_tasks_status ON kanban_tasks(status)`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_tasks_assigned ON kanban_tasks(assigned_agent_id)`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_tasks_created ON kanban_tasks(created_at)`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE TABLE task_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY (task_id) REFERENCES kanban_tasks(id))`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id)`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS job_search_profiles (
+        id TEXT NOT NULL,
+        ceo_user_id TEXT NOT NULL DEFAULT 'default',
+        display_name TEXT DEFAULT '',
+        status TEXT DEFAULT 'draft',
+        intake_json TEXT DEFAULT '{}',
+        version INTEGER DEFAULT 1,
+        confirmed_at TEXT,
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (ceo_user_id, id)
+      )
+    `);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE job_search_profiles ADD COLUMN ceo_user_id TEXT DEFAULT 'default'`);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE job_search_profiles ADD COLUMN display_name TEXT DEFAULT ''`);
+  } catch (_) {}
+  try {
+    _db.exec(`UPDATE job_search_profiles SET ceo_user_id = 'default' WHERE ceo_user_id IS NULL OR ceo_user_id = ''`);
+  } catch (_) {}
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS job_search_ceo_settings (
+        ceo_user_id TEXT PRIMARY KEY,
+        active_profile_id TEXT,
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE job_applications ADD COLUMN profile_id TEXT`);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE job_applications ADD COLUMN ceo_user_id TEXT DEFAULT 'default'`);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE job_pipeline_state ADD COLUMN ceo_user_id TEXT DEFAULT 'default'`);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE job_pipeline_state ADD COLUMN active_profile_id TEXT`);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE job_pipeline_state ADD COLUMN active_workflow_run_id INTEGER`);
+  } catch (_) {}
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS job_applications (
+        job_id TEXT PRIMARY KEY,
+        status TEXT DEFAULT 'discovered',
+        source TEXT,
+        company TEXT,
+        title TEXT,
+        location TEXT,
+        url TEXT,
+        fit_score REAL,
+        fit_rationale TEXT,
+        why_me_summary TEXT,
+        cover_letter_text TEXT,
+        tailoring_notes TEXT,
+        owner_action TEXT,
+        application_notes TEXT,
+        extra_json TEXT,
+        discovered_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_job_applications_status ON job_applications(status)`);
+  } catch (_) {}
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS job_pipeline_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        standup_id INTEGER,
+        enabled INTEGER DEFAULT 0,
+        last_discovery_at TEXT,
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE job_search_profiles ADD COLUMN last_pipeline_run_at TEXT`);
+  } catch (_) {}
+  try {
+    _db.exec(`INSERT OR IGNORE INTO job_pipeline_state (id, enabled) VALUES (1, 0)`);
+  } catch (_) {}
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS job_workflow_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_number INTEGER NOT NULL,
+        ceo_user_id TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        workflow_goal TEXT DEFAULT 'job_application',
+        status TEXT DEFAULT 'running',
+        trigger TEXT DEFAULT 'manual',
+        started_at TEXT DEFAULT (datetime('now')),
+        completed_at TEXT,
+        kanban_ceo_review_task_id INTEGER,
+        metadata_json TEXT,
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS job_workflow_steps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_run_id INTEGER NOT NULL,
+        step_key TEXT NOT NULL,
+        step_label TEXT NOT NULL,
+        step_order INTEGER NOT NULL,
+        status TEXT DEFAULT 'pending',
+        actor_type TEXT,
+        actor_id TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        detail_json TEXT,
+        updated_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (workflow_run_id) REFERENCES job_workflow_runs(id)
+      )
+    `);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_job_workflow_runs_profile ON job_workflow_runs(ceo_user_id, profile_id)`);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_job_workflow_steps_run ON job_workflow_steps(workflow_run_id)`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS platform_users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        name TEXT NOT NULL,
+        region TEXT DEFAULT '',
+        mobile TEXT DEFAULT '',
+        role TEXT NOT NULL CHECK (role IN ('admin', 'ceo')),
+        enabled INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS platform_sessions (
+        token TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (user_id) REFERENCES platform_users(id)
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS user_agents (
+        user_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        enabled INTEGER DEFAULT 1,
+        granted_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (user_id, agent_id),
+        FOREIGN KEY (user_id) REFERENCES platform_users(id),
+        FOREIGN KEY (agent_id) REFERENCES agents(id)
+      )
+    `);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_platform_users_email ON platform_users(email)`);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_user_agents_user ON user_agents(user_id)`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`ALTER TABLE agents ADD COLUMN agent_type TEXT DEFAULT 'standard'`);
+  } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE agents ADD COLUMN owner_user_id TEXT`);
+  } catch (_) {}
+  try {
+    _db.exec(`UPDATE agents SET agent_type = 'standard' WHERE agent_type IS NULL OR agent_type = ''`);
   } catch (_) {}
 
   return _db;

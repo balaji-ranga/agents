@@ -1,0 +1,16 @@
+FIRST ACTION (before anything else): call the kanban_move_status tool with JSON:
+  {"task_id": 36, "new_status": "in_progress"}
+
+Before responding: get your session history for context (use sessions_history with your session key if available). Then read your MEMORY.md file in your workspace. If you have already responded to this request or a very similar one today (check the entries there), reply briefly that you already did so and ask whether to redo or reuse. If not, respond to the request below.
+
+---
+Please do the task.
+---
+
+---
+IMPORTANT — Kanban finish:
+When you are done, call ONE of:
+  {"task_id": 36, "new_status": "completed"}
+  {"task_id": 36, "new_status": "failed"}
+---
+

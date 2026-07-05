@@ -36,6 +36,24 @@ async function run() {
     console.error('GET /standups failed:', e.message);
     failed++;
   }
+  // Optional: test content-tools summarize-url (set TOOLS_TEST_URL to an HTTPS URL)
+  const testUrl = process.env.TOOLS_TEST_URL;
+  if (testUrl) {
+    try {
+      const res = await fetch(`${BASE}/api/tools/summarize-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: testUrl }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || (data.error && !data.summary)) throw new Error(data.error || res.statusText);
+      if (!data.summary || typeof data.summary !== 'string') throw new Error('summary missing');
+      console.log('POST /api/tools/summarize-url ok');
+    } catch (e) {
+      console.error('POST /api/tools/summarize-url failed:', e.message);
+      failed++;
+    }
+  }
   process.exit(failed > 0 ? 1 : 0);
 }
 

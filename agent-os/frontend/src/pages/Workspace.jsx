@@ -6,6 +6,16 @@ export default function Workspace() {
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [clearingAgentId, setClearingAgentId] = useState(null);
+
+  const clearSessions = (agentId) => {
+    if (!window.confirm('Clear all OpenClaw sessions for this agent? Chat and task session history will be reset.')) return;
+    setClearingAgentId(agentId);
+    api.agentSessionsClear(agentId)
+      .then(() => setError(null))
+      .catch((e) => setError(e.message))
+      .finally(() => setClearingAgentId(null));
+  };
 
   const fetchAgents = () => {
     setLoading(true);
@@ -77,6 +87,23 @@ export default function Workspace() {
               >
                 Chat
               </Link>
+              <button
+                type="button"
+                onClick={() => clearSessions(a.id)}
+                disabled={clearingAgentId === a.id}
+                title="Clear OpenClaw sessions for this agent"
+                style={{
+                  padding: '0.35rem 0.75rem',
+                  background: 'transparent',
+                  color: 'var(--muted)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 6,
+                  fontSize: '0.9rem',
+                  cursor: 'pointer',
+                }}
+              >
+                {clearingAgentId === a.id ? 'Clearing…' : 'Clear sessions'}
+              </button>
               <button
                 type="button"
                 onClick={() => removeAgent(a.id)}

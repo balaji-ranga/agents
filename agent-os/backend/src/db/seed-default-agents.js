@@ -22,12 +22,12 @@ export function seedDefaultAgentsIfEmpty() {
   const techPath = defaultWorkspace('OPENCLAW_WORKSPACE_TECHRESEARCHER', 'workspace-techresearcher');
 
   db.prepare(
-    `INSERT INTO agents (id, name, role, workspace_path, openclaw_agent_id, is_coo) VALUES (?, ?, ?, ?, ?, ?)`
-  ).run('balserve', 'BalServe', 'COO', balservePath, 'balserve', 1);
+    `INSERT INTO agents (id, name, role, workspace_path, openclaw_agent_id, is_coo, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run('balserve', 'BalServe', 'COO', balservePath, 'balserve', 1, 'standard');
 
   db.prepare(
-    `INSERT INTO agents (id, name, role, parent_id, workspace_path, openclaw_agent_id, is_coo) VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run('techresearcher', 'TechResearcher', 'Research (AI & Tech)', 'balserve', techPath, 'techresearcher', 0);
+    `INSERT INTO agents (id, name, role, parent_id, workspace_path, openclaw_agent_id, is_coo, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('techresearcher', 'TechResearcher', 'Research (AI & Tech)', 'balserve', techPath, 'techresearcher', 0, 'standard');
 
   console.log('Agent OS: seeded default agents (BalServe, TechResearcher).');
   return true;

@@ -11,7 +11,10 @@ Write-Host "Agent OS: starting services..." -ForegroundColor Cyan
 
 # 1) OpenClaw gateway (port 18789)
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$AgentOsRoot'; openclaw gateway --port 18789" -WindowStyle Normal
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 10
+Write-Host "Warming up OpenClaw managed browser (Playwright)..." -ForegroundColor Cyan
+node (Join-Path $AgentOsRoot "scripts\warmup-openclaw-browser.js")
+Start-Sleep -Seconds 2
 
 # 2) Backend (port 3001)
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$AgentOsRoot\backend'; npm run dev" -WindowStyle Normal

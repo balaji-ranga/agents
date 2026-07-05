@@ -24,11 +24,14 @@ Use this skill to communicate with other agents in the same OpenClaw gateway.
 
 ## Session keys
 
-- Main chat for an agent: `agent::<agentId>:main` (e.g. `agent::techresearcher:main`, `agent::expensemanager:main`, `agent::balserve:main`, `agent::bala:main`).
+- **Always use the full format:** `agent::<agentId>:main`. The gateway requires this exact format; passing only the agent id (e.g. `techresearcher`) will fail with "No session found".
+- Main chat for an agent: `agent::techresearcher:main`, `agent::expensemanager:main`, `agent::balserve:main`, `agent::bala:main`, `agent::socialasstant:main` (agent id in **lowercase**).
+- **Your own session:** Use `agent::<your agent id>:main` with your id in lowercase (e.g. if you are TechResearcher, use `agent::techresearcher:main`).
 - Get exact keys from `sessions_list` if needed.
 
 ## Guidelines
 
+- **Delegated agents (TechResearcher, ExpenseManager, SocialAssistant):** Do not use sessions_send to delegate or forward the user's request. You execute the task yourself; use sessions_send only for narrow cases (e.g. asking another agent for a specific fact), not for passing the request along. The COO delegates; you respond.
 - Prefer `sessions_send` with `timeoutSeconds > 0` when you need a reply from the other agent.
 - Use `timeoutSeconds: 0` for fire-and-forget notifications.
 - Use `sessions_history` only when you need prior context; avoid unnecessary reads.

@@ -30,25 +30,23 @@ export async function cronAddOneShotWebhook({ name, agentId, message, webhookUrl
   const token = getGatewayToken();
   const atTime = at || new Date().toISOString();
 
-  const body = {
-    tool: 'cron_add',
-    args: {
-      name: name || `agent-os-${Date.now()}`,
-      schedule: { kind: 'at', at: atTime },
-      sessionTarget: 'isolated',
-      wakeMode: 'now',
-      payload: {
-        kind: 'agentTurn',
-        message: message || 'Report status.',
-      },
-      delivery: {
-        mode: 'webhook',
-        to: webhookUrl,
-      },
-      deleteAfterRun: true,
-      ...(agentId ? { agentId } : {}),
+  const args = {
+    name: name || `agent-os-${Date.now()}`,
+    schedule: { kind: 'at', at: atTime },
+    sessionTarget: 'isolated',
+    wakeMode: 'now',
+    payload: {
+      kind: 'agentTurn',
+      message: message || 'Report status.',
     },
+    delivery: {
+      mode: 'webhook',
+      to: webhookUrl,
+    },
+    deleteAfterRun: true,
+    ...(agentId ? { agentId } : {}),
   };
+  const body = { tool: 'cron.add', args };
 
   const headers = {
     'Content-Type': 'application/json',
@@ -56,13 +54,18 @@ export async function cronAddOneShotWebhook({ name, agentId, message, webhookUrl
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   try {
-    const res = await fetch(url, {
+    let res = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
     });
-    const data = await res.json().catch(() => ({}));
+    let data = await res.json().catch(() => ({}));
+    if (res.status === 404 && body.tool === 'cron.add') {
+      body.tool = 'cron_add';
+      res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
+      data = await res.json().catch(() => ({}));
+    }
     if (!res.ok) {
       const errMsg = data?.error?.message || data?.error || res.statusText;
       return { ok: false, error: errMsg };

@@ -21,6 +21,8 @@ The backend uses the [OpenClaw Gateway](https://docs.openclaw.ai/gateway) HTTP A
 - **OPENAI_API_KEY** in backend `.env` for **Run COO** (standup + CEO summary via OpenAI). Optional: `OPENAI_COO_MODEL` (default `gpt-4o-mini`).
 - Optional: **STANDUP_CRON_SCHEDULE** (cron expression, e.g. `0 9 * * *` for 9 AM daily) to run standup collection and COO automatically.
 - Optional: **DELEGATION_CRON_SCHEDULE** (default `* * * * *` = every minute) — processes queued COO→agent messages and posts response callbacks to the standup so the COO never blocks on agent replies.
+- Optional: **AGENT_OS_BASE_URL** or **PUBLIC_URL** — base URL where the backend is reachable (for cron webhook callbacks). Defaults to `http://127.0.0.1:3001`.
+- Optional: **AGENT_OS_DATA_DIR** — directory for SQLite DB (default: `backend/data`).
 
 ## Quick start
 
@@ -63,16 +65,32 @@ openclaw gateway --port 18789
 Set in backend `.env`:
 
 - `OPENCLAW_GATEWAY_URL=http://127.0.0.1:18789`
-- `OPENCLAW_GATEWAY_TOKEN=<your gateway token or password>` (if you set `gateway.auth` in OpenClaw config)
+
+**Setting up OpenClaw from scratch:** Run `.\scripts\setup-openclaw-from-scratch.ps1` from the `agent-os` folder. It bootstraps OpenClaw, seeds the DB (all agents + ExpenseManager), installs agent-send and content-tools skills and extension, applies `openclaw.json` (agents, plugins, Ollama), ensures workspace templates (SOUL/MEMORY) and COO AGENTS.md, and ensures agent dirs. Then run `openclaw gateway --port 18789` and start backend + frontend.
+- `OPENCLAW_GATEWAY_TOKEN=<your gateway token or password>` (if you set `gateway.auth` in OpenClaw config). **If you see "gateway closed (1008): pairing required"**, add `gateway.auth.token` in `~/.openclaw/openclaw.json`, set `OPENCLAW_GATEWAY_TOKEN` in `.env` to the same value, and restart the gateway — see **knowledgebase/GATEWAY-PAIRING-1008.md**.
 
 ## What’s included
 
 | Feature | Description |
 |--------|-------------|
-| **Dashboard** | List agents (org chart); add agent; open **Chat** per agent. |
+| **Dashboard** | List agents (org chart); add agent; open **Chat** per agent; standups with COO chat; **delete all standups**; sync from OpenClaw. |
 | **Chat** | 1:1 chat with an OpenClaw agent via gateway; session affinity per agent; history stored in SQLite. |
+| **Notifications** | **Bell icon in the app nav** (all pages): recent agent delegation responses; link to agent Chat; clear/dismiss. Data from `GET /api/standups/notifications`. |
+| **Kanban** | Board view (tasks by agent and status); task detail with **task chat**. When you send a message in a task assigned to an agent, the session continues: backend calls the agent and appends its reply. Reopen task; create task (COO or direct to agent). |
+| **Tools onboarding** | **Script** `scripts/onboard-api-tool.js` onboards a new API as a tool from a JSON file (name, description, endpoint, API key/bearer, applicable agents). Updates DB `content_tools_meta`, regenerates `~/.openclaw/agent-os-tools.json`, merges per-agent overrides into `openclaw.json`. Restart the gateway after onboarding. See `scripts/tool-definitions/README.md` for the JSON schema. |
 | **Workspace** | View/edit SOUL.md, AGENTS.md, MEMORY.md (and optional daily `memory/*.md`). Backups on save. |
-| **DB** | SQLite in `backend/data/agent-os.db`: agents, activities, chat_turns. |
+| **DB** | SQLite in `backend/data/agent-os.db`: agents (with `workspace_path`), activities, chat_turns, standups, standup_responses, standup_messages, agent_delegation_tasks, delegation_callbacks, content_tool_logs, kanban_tasks, task_messages, content_tools_meta. |
+| **Agent memory** | Backend injects each agent’s MEMORY.md into delegation prompts and appends a one-line summary when a task completes (cron callback and process-delegations). Workspace path comes from DB per agent. |
+
+### Tools onboarding (script)
+
+To add a new API as an agent-callable tool (e.g. a public API like forex rates): create a JSON file in `scripts/tool-definitions/` with `name`, `description`, `endpoint`, `method`, optional `api_key_bearer`, and `applicable_agents` (`"All"` or a list of agent ids). Run from the `agent-os` folder:
+
+```bash
+node scripts/onboard-api-tool.js scripts/tool-definitions/your-tool.json
+```
+
+Then restart the OpenClaw gateway. The script updates the DB (`content_tools_meta`), writes `~/.openclaw/agent-os-tools.json` and `agent-os-tool-overrides.json`, and merges into `openclaw.json` so only the chosen agents get the tool. See `scripts/tool-definitions/README.md` for the full schema and examples.
 
 ## API (backend)
 
@@ -91,13 +109,17 @@ Set in backend `.env`:
 - `POST /agents/:id/activities` — append activity
 - All API routes are under **`/api`** (e.g. `/api/standups`, `/api/cron`). The frontend uses `VITE_API_URL` or proxy to `/api`.
 - `GET /api/standups` — list standups (query: `?limit=50`)
+- `GET /api/standups/notifications` — recent completed delegation tasks (agent responses) for the notifications bell
+- `DELETE /api/standups/all` — delete all standups and related data (messages, responses, delegation tasks; kanban_tasks.standup_id cleared)
 - `GET /api/standups/:id` — get standup with responses and messages
 - `POST /api/standups` — create standup (body: `{ "scheduled_at": "...", "status": "scheduled" }`)
 - `PATCH /api/standups/:id` — update standup (coo_summary, ceo_summary, status)
+- `DELETE /api/standups/:id` — delete one standup and related data
 - `POST /api/standups/:id/responses` — add response (body: `{ "agent_id": "...", "content": "..." }`)
 - `POST /api/standups/:id/run-coo` — generate COO + CEO summary via OpenAI (requires `OPENAI_API_KEY` in backend `.env`)
 - `POST /api/cron/run-standup` — run standup flow now: create standup, collect status from agents (OpenClaw), run COO. Can be triggered manually from the Dashboard.
 - `POST /api/cron/process-delegations` — aggregate completed delegation batches and post COO callback messages to standups (e.g. after OpenClaw cron webhooks have updated tasks).
+- **Kanban:** `GET /api/kanban/tasks` (query: `view=daily|weekly|monthly|range`, `from`, `to`), `GET /api/kanban/tasks/:id` (task + messages + delegation context), `POST /api/kanban/tasks/:id/messages` (body: `{ role, content }`) — add message; if task has an assigned agent, backend continues the session (calls gateway and appends agent reply). `PATCH /api/kanban/tasks/:id`, `POST /api/kanban/tasks/:id/reopen`.
 - **Standup chat with COO:** `POST /api/standups/:id/messages` with `{ content }` — chat with the COO agent (OpenClaw). With `{ action: 'get_work_from_team' }` — **OpenClaw Gateway cron** is used: one one-shot job per agent is created via the Gateway's `/tools/invoke` (cron_add); each job runs the agent and POSTs the result to `POST /api/standups/cron-callback`. The backend then posts a COO message to the standup with the team's responses. **Check for updates** calls `POST /api/cron/process-delegations` to aggregate any completed batches. Set `AGENT_OS_BASE_URL` (or `PUBLIC_URL`) if the backend is not at `http://127.0.0.1:3001` so the webhook URL is reachable by the Gateway. Deep research: `{ action: 'request_research', content: '...' }` queues one task; same callback pattern.
 
 ## Restart and test
@@ -109,24 +131,39 @@ cd backend && npm run test:smoke   # quick: health, agents, standups
 cd backend && npm run test:full    # full: create agent, standups, workspace MD, chat (set SKIP_CHAT=1 if gateway not running)
 ```
 
-See **TESTING.md** for full test cases (including frontend manual tests) and restart steps.
+See **knowledgebase/TESTING.md** for full test cases (including frontend manual tests) and restart steps.
+
+## Database and scripts
+
+- **Schema and init:** `backend/src/db/schema.js` — creates all tables, `initDb()`, `getDb()`. DB file: `backend/data/agent-os.db` (or `AGENT_OS_DATA_DIR` in `.env`).
+- **Default seed:** `backend/src/db/seed-default-agents.js` — seeds default agents.
+- **Seed and utility scripts (use the DB):** `backend/scripts/` — e.g. `seed-all.js`, `seed-balserve.js`, `seed-techresearcher.js`, `seed-expenses.js`, `create-openclaw-agent.js`, `clear-schedules.js`, `ensure-techresearcher.js`, `ensure-coo-workspace.js`, `check-content-logs.js`, `start-gateway-with-env.js`.
+- **OpenClaw and workspace scripts (repo root):** `scripts/` — e.g. **`setup-openclaw-from-scratch.ps1`** (full setup: agents, skills, config, workspaces), **`onboard-api-tool.js`** (onboard a new API tool from `scripts/tool-definitions/*.json`; updates DB and OpenClaw tool list; restart gateway after), `apply-openclaw-agents-config.js`, `ensure-all-agent-workspaces.js`, `fix-openclaw-ollama-models.js`, `ensure-openclaw-agent-dirs.js`, `restart-and-test.ps1`, `stop-and-restart-gateway.ps1` (stop process on 18789, start OpenClaw gateway).
+
+No separate migration folder; schema changes are in `schema.js` (with optional `ALTER TABLE` blocks for existing DBs).
 
 ## Project layout
 
 ```
 agent-os/
-├── IMPLEMENTATION_PLAN.md
 ├── README.md
+├── knowledgebase/           # Docs: TESTING, GITHUB-SETUP, IMPLEMENTATION_PLAN, AGENT_REVIEW_AND_SKILLS, CONFIGURE-CLAUDE-OPUS (see knowledgebase/README.md)
+├── scripts/                    # OpenClaw/workspace scripts; onboard-api-tool.js, tool-definitions/*.json (tools onboarding)
+├── openclaw-workspace-templates/  # SOUL.md, MEMORY.md (and AGENTS.md) per agent type
 ├── backend/
 │   ├── .env.example
 │   ├── package.json
-│   ├── data/               # SQLite DB (created on first run)
+│   ├── data/                   # SQLite DB: agent-os.db (or AGENT_OS_DATA_DIR)
+│   ├── scripts/                # DB seeds and utilities (seed-all, seed-*, ensure-*, clear-schedules, etc.)
 │   └── src/
 │       ├── index.js
-│       ├── db/schema.js
+│       ├── db/
+│       │   ├── schema.js       # DB init, table definitions, getDb
+│       │   └── seed-default-agents.js
 │       ├── workspace/adapter.js
 │       ├── gateway/openclaw.js
-│       └── routes/workspace.js, agents.js
+│       ├── services/delegation-queue.js, standup-delegate.js, coo.js
+│       └── routes/workspace.js, agents.js, standups.js, openclaw.js, tools.js
 └── frontend/
     ├── package.json
     ├── index.html
@@ -135,8 +172,13 @@ agent-os/
         ├── main.jsx
         ├── App.jsx
         ├── api.js
-        └── pages/Dashboard.jsx, Workspace.jsx, AgentChat.jsx
+        ├── components/NotificationBell.jsx
+        └── pages/Dashboard.jsx, Workspace.jsx, AgentChat.jsx, Kanban.jsx, Broadcast.jsx, ContentToolsLogs.jsx
 ```
+
+## Documentation (knowledge base)
+
+All project docs except this README live in **`knowledgebase/`**: testing, GitHub setup, implementation plan, agent/skills review, OpenClaw model config. See **knowledgebase/README.md** for the index. Cursor and other tools can refer to `knowledgebase/` for context.
 
 ## License
 

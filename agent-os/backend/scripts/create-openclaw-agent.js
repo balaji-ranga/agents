@@ -10,10 +10,11 @@
  *   "parent_id": "balserve",
  *   "soul_md": "# SOUL — ...",
  *   "agents_md": "# AGENTS — ...",
- *   "memory_md": "# MEMORY — ..."
+ *   "memory_md": "# MEMORY — ...",
+ *   "tools_md": "# TOOLS — ..." (optional)
  * }
  *
- * Creates: workspace dir, SOUL.md/AGENTS.md/MEMORY.md, openclaw.json entry, agent dirs, DB row.
+ * Creates: workspace dir, SOUL.md/AGENTS.md/MEMORY.md (and TOOLS.md if tools_md provided), openclaw.json entry, agent dirs, DB row.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -78,6 +79,10 @@ const memoryMd = def.memory_md || `# MEMORY — ${name}\n\n## Facts\n- Role: ${r
 await workspace.writeWorkspaceFile('soul', soulMd, { workspaceRoot: WORKSPACE_PATH });
 await workspace.writeWorkspaceFile('agents', agentsMd, { workspaceRoot: WORKSPACE_PATH });
 await workspace.writeWorkspaceFile('memory', memoryMd, { workspaceRoot: WORKSPACE_PATH });
+if (def.tools_md) {
+  await workspace.writeWorkspaceFile('tools', def.tools_md, { workspaceRoot: WORKSPACE_PATH });
+  console.log('Wrote TOOLS.md to', WORKSPACE_PATH);
+}
 console.log('Wrote SOUL.md, AGENTS.md, MEMORY.md to', WORKSPACE_PATH);
 
 let config = {};

@@ -1,16 +1,11 @@
 /**
- * COO summarization: call OpenAI to produce standup summary and CEO digest.
- * Requires OPENAI_API_KEY in env.
+ * COO summarization: call OpenAPI-compliant LLM to produce standup summary and CEO digest.
+ * Uses config/llm.js: OPENAI_BASE_URL (or OPENAI_API_URL), OPENAI_PRIMARY_MODEL, OPENAI_SECONDARY_MODEL.
+ * Override for COO: OPENAI_COO_MODEL. Requires OPENAI_API_KEY in env.
  */
+import { chatCompletions } from '../config/llm.js';
 
-const API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
-const DEFAULT_MODEL = process.env.OPENAI_DEFAULT_MODEL || 'gpt-4o-mini';
-
-function getApiKey() {
-  const key = (process.env.OPENAI_API_KEY || '').trim();
-  if (!key) throw new Error('OPENAI_API_KEY not set');
-  return key;
-}
+const COO_MODEL_OVERRIDE = process.env.OPENAI_COO_MODEL || null;
 
 /**
  * @param {Array<{ agent_id: string, content: string }>} responses - standup responses
@@ -20,45 +15,24 @@ function getApiKey() {
  */
 export async function runCooSummarization(responses, activities = [], conversation = []) {
   const userContent = buildPrompt(responses, activities, conversation);
-  const model = process.env.OPENAI_COO_MODEL || DEFAULT_MODEL;
-
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${getApiKey()}`,
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 1024,
-      messages: [
-        {
-          role: 'system',
-          content: `You are the COO for an agent operating system. You will be given (1) the conversation in this standup chat (CEO and COO messages), and (2) standup responses from agents. Produce exactly two short sections that are specific to this standup session:
+  const messages = [
+    {
+      role: 'system',
+      content: `You are the COO for an agent operating system. You will be given (1) the conversation in this standup chat (CEO and COO messages), and (2) standup responses from agents. Produce exactly two short sections that are specific to this standup session:
 
 1. **COO summary** — 2–4 sentences: what was discussed in this standup, what each agent reported, any blockers or decisions.
 2. **CEO summary** — One short paragraph for the CEO: key takeaways from this standup, one thing to watch, any approval needed.
 
 Base your summary on this standup's conversation and agent responses only. Keep tone professional and concise. Output only the two sections with headers "COO summary:" and "CEO summary:" so they can be parsed.`,
-        },
-        { role: 'user', content: userContent },
-      ],
-    }),
-    signal: AbortSignal.timeout(60000),
+    },
+    { role: 'user', content: userContent },
+  ];
+
+  const { content: text } = await chatCompletions({
+    messages,
+    modelOverride: COO_MODEL_OVERRIDE || undefined,
+    maxTokens: 1024,
   });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    let errJson;
-    try {
-      errJson = JSON.parse(errText);
-    } catch (_) {}
-    const msg = errJson?.error?.message || errText || res.statusText;
-    throw new Error(`OpenAI API ${res.status}: ${msg}`);
-  }
-
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content ?? '';
   return parseCooOutput(text);
 }
 
@@ -103,11 +77,10 @@ function parseCooOutput(text) {
  * Interactive standup: COO presents agent work for CEO review and asks for approval and today's topics/tasks.
  * @param {Array<{ role: string, content: string }>} conversation - prior messages (user, coo, ...)
  * @param {Array<{ agent_id: string, content: string }>} agentResponses - work from agents (actual content)
- * @param {string} [agentNames] - optional map agent_id -> name for display
+ * @param {Record<string, string>} [agentNames] - optional map agent_id -> name for display
  * @returns {Promise<string>} COO reply to show to CEO
  */
 export async function runCooInteractiveStandup(conversation, agentResponses = [], agentNames = {}) {
-  const model = process.env.OPENAI_COO_MODEL || DEFAULT_MODEL;
   let userContent = '';
   if (conversation.length > 0) {
     userContent = 'Conversation so far:\n' + conversation.map((m) => `${m.role}: ${m.content}`).join('\n\n') + '\n\n';
@@ -131,23 +104,10 @@ Be concise and conversational. Address the CEO directly. If there is no agent wo
     { role: 'user', content: userContent },
   ];
 
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${getApiKey()}`,
-    },
-    body: JSON.stringify({ model, max_tokens: 1024, messages }),
-    signal: AbortSignal.timeout(60000),
+  const { content } = await chatCompletions({
+    messages,
+    modelOverride: COO_MODEL_OVERRIDE || undefined,
+    maxTokens: 1024,
   });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    let errJson;
-    try { errJson = JSON.parse(errText); } catch (_) {}
-    throw new Error(errJson?.error?.message || errText || res.statusText);
-  }
-
-  const data = await res.json();
-  return (data.choices?.[0]?.message?.content ?? '').trim() || 'Standup updated. What would you like to delegate today?';
+  return (content ?? '').trim() || 'Standup updated. What would you like to delegate today?';
 }

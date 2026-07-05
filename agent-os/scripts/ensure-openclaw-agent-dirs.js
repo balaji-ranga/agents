@@ -8,7 +8,7 @@ import { join } from 'path';
 const USERPROFILE = process.env.USERPROFILE || process.env.HOME || '';
 const AGENTS_ROOT = join(USERPROFILE, '.openclaw', 'agents');
 
-const AGENT_IDS = ['bala', 'balserve', 'techresearcher', 'expensemanager'];
+const AGENT_IDS = ['bala', 'balserve', 'techresearcher', 'expensemanager', 'socialasstant'];
 
 for (const id of AGENT_IDS) {
   const agentDir = join(AGENTS_ROOT, id, 'agent');

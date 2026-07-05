@@ -1,15 +1,20 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
+import { useAuth } from '../context/AuthContext';
+import ChatMessageContent from '../components/ChatMessageContent';
 
 export default function AgentChat() {
   const { agentId } = useParams();
+  const [searchParams] = useSearchParams();
+  const profileId = searchParams.get('profile_id') || null;
+  const { dataCeoUserId } = useAuth();
   const [agent, setAgent] = useState(null);
   const [turns, setTurns] = useState([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
-  const bottomRef = useRef(null);
+  const scrollRef = useRef(null);
 
   useEffect(() => {
     api.agentGet(agentId)
@@ -25,8 +30,9 @@ export default function AgentChat() {
   }, [agentId]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [turns]);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [turns, sending]);
 
   const send = (e) => {
     e.preventDefault();
@@ -35,9 +41,8 @@ export default function AgentChat() {
     setInput('');
     setSending(true);
     setError(null);
-    // Optimistic user turn
     setTurns((prev) => [...prev, { role: 'user', content: msg, created_at: new Date().toISOString() }]);
-    api.agentChatSend(agentId, msg)
+    api.agentChatSend(agentId, msg, dataCeoUserId || 'default', profileId)
       .then((r) => {
         setTurns((prev) => [...prev, { role: 'assistant', content: r.reply, created_at: new Date().toISOString() }]);
       })
@@ -51,25 +56,33 @@ export default function AgentChat() {
   if (error && !agent) return <div style={{ padding: '2rem', color: '#f87171' }}>Error: {error}. <Link to="/">Back to Dashboard</Link></div>;
 
   return (
-    <div style={{ padding: '2rem', height: '100%', display: 'flex', flexDirection: 'column', maxWidth: 800, margin: '0 auto' }}>
-      <div style={{ marginBottom: '1rem' }}>
+    <div className="page-chat" style={{ padding: '2rem', maxWidth: 800, margin: '0 auto', width: '100%' }}>
+      <div style={{ flexShrink: 0, marginBottom: '1rem' }}>
         <Link to="/" style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>← Dashboard</Link>
         <h1 style={{ margin: '0.5rem 0 0 0' }}>{agent?.name || agentId} — Chat</h1>
-        <p style={{ color: 'var(--muted)', margin: 0 }}>Human–agent interaction via OpenClaw gateway. Session is preserved per agent.</p>
+        <p style={{ color: 'var(--muted)', margin: 0 }}>
+          Human–agent interaction via OpenClaw gateway.
+          {profileId && <> Profile context: <code>{profileId}</code></>}
+        </p>
       </div>
 
-      {error && <div style={{ padding: '0.5rem 1rem', background: 'rgba(248,113,113,0.15)', borderRadius: 8, marginBottom: '1rem', color: '#f87171' }}>{error}</div>}
+      {error && (
+        <div style={{ flexShrink: 0, padding: '0.5rem 1rem', background: 'rgba(248,113,113,0.15)', borderRadius: 8, marginBottom: '1rem', color: '#f87171' }}>
+          {error}
+        </div>
+      )}
 
-      <div style={{
-        flex: 1,
-        overflow: 'auto',
-        background: 'var(--surface)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        padding: '1rem',
-        marginBottom: '1rem',
-        minHeight: 320,
-      }}>
+      <div
+        ref={scrollRef}
+        className="chat-scroll-panel"
+        style={{
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          padding: '1rem',
+          marginBottom: '1rem',
+        }}
+      >
         {turns.length === 0 && !sending && <div style={{ color: 'var(--muted)' }}>No messages yet. Send a message below.</div>}
         {turns.map((t, i) => (
           <div
@@ -83,14 +96,13 @@ export default function AgentChat() {
             }}
           >
             <span style={{ fontSize: '0.75rem', color: 'var(--muted)', marginRight: '0.5rem' }}>{t.role}</span>
-            <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{t.content}</div>
+            <ChatMessageContent content={t.content} />
           </div>
         ))}
         {sending && <div style={{ color: 'var(--muted)' }}>…</div>}
-        <div ref={bottomRef} />
       </div>
 
-      <form onSubmit={send}>
+      <form onSubmit={send} style={{ flexShrink: 0 }}>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <input
             type="text"

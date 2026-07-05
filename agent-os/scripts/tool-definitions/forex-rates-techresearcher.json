@@ -1,0 +1,7 @@
+{
+  "name": "forex_rates",
+  "description": "Get latest foreign exchange rates. Call with optional parameter base (e.g. USD, EUR). Default base is USD if not specified. Returns rates from Frankfurter API.",
+  "endpoint": "https://api.frankfurter.dev/v1/latest",
+  "method": "GET",
+  "applicable_agents": ["techresearcher"]
+}

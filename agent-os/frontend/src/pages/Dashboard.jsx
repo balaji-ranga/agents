@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
+import ChatMessageContent from '../components/ChatMessageContent';
 
 // Build hierarchy: CEO (me) → COO → delegated agents
 function buildHierarchy(agents) {
@@ -60,6 +61,7 @@ function useEdgeTTS() {
 }
 
 export default function Dashboard() {
+  const { speak, stop, speaking } = useEdgeTTS();
   const [agents, setAgents] = useState([]);
   const [standups, setStandups] = useState([]);
   const [selectedStandup, setSelectedStandup] = useState(null);
@@ -68,6 +70,7 @@ export default function Dashboard() {
   const [newName, setNewName] = useState('');
   const [newRole, setNewRole] = useState('');
   const [newParentId, setNewParentId] = useState('');
+  const [addAgentMessage, setAddAgentMessage] = useState(null);
   const [creatingStandup, setCreatingStandup] = useState(false);
   const [standupScheduledAt, setStandupScheduledAt] = useState(() => {
     const d = new Date();
@@ -81,11 +84,13 @@ export default function Dashboard() {
   const [checkUpdatesLoading, setCheckUpdatesLoading] = useState(false);
   const [standupChatInput, setStandupChatInput] = useState('');
   const [deletingStandupId, setDeletingStandupId] = useState(null);
+  const [deletingAllStandups, setDeletingAllStandups] = useState(false);
   const [openclawData, setOpenclawData] = useState(null);
   const [openclawLoading, setOpenclawLoading] = useState(false);
   const [openclawSyncing, setOpenclawSyncing] = useState(false);
-  const { speak, stop, speaking } = useEdgeTTS();
-
+  const [showCreateStandupModal, setShowCreateStandupModal] = useState(false);
+  const [standupTitle, setStandupTitle] = useState('');
+  const [standupOutcomes, setStandupOutcomes] = useState('');
   const refreshStandup = () => {
     if (!selectedStandup?.id) return;
     api.standupGet(selectedStandup.id)
@@ -113,9 +118,16 @@ export default function Dashboard() {
     fetchData();
   }, []);
 
+  const outcomeSentForStandup = useRef(new Set());
   useEffect(() => {
     if (!selectedStandup?.id || selectedStandup.responses !== undefined) return;
-    api.standupGet(selectedStandup.id).then(setSelectedStandup).catch(() => {});
+    api.standupGet(selectedStandup.id).then((s) => {
+      setSelectedStandup(s);
+      if (s.outcomes?.trim() && (!s.messages || s.messages.length === 0) && !outcomeSentForStandup.current.has(s.id)) {
+        outcomeSentForStandup.current.add(s.id);
+        api.standupSendMessage(s.id, { content: s.outcomes.trim() }).then(() => api.standupGet(s.id)).then(setSelectedStandup).catch(() => {});
+      }
+    }).catch(() => {});
   }, [selectedStandup?.id]);
 
   // Auto-refresh standup chat so delegated agent responses appear without clicking "Check for updates"
@@ -125,12 +137,15 @@ export default function Dashboard() {
     const tick = () => {
       api.standupGet(selectedStandup.id)
         .then((s) => {
+          let hasNewMessages = false;
           setSelectedStandup((prev) => {
             if (!prev || prev.id !== s.id) return prev;
             const prevMsgCount = Array.isArray(prev.messages) ? prev.messages.length : 0;
             const nextMsgCount = Array.isArray(s.messages) ? s.messages.length : 0;
-            if (nextMsgCount > prevMsgCount || JSON.stringify(prev.messages) !== JSON.stringify(s.messages))
+            if (nextMsgCount > prevMsgCount || JSON.stringify(prev.messages) !== JSON.stringify(s.messages)) {
+              hasNewMessages = nextMsgCount > prevMsgCount;
               return s;
+            }
             return prev;
           });
           setStandups((prev) => prev.map((x) => (x.id === s.id ? s : x)));
@@ -144,6 +159,7 @@ export default function Dashboard() {
   const addAgent = (e) => {
     e.preventDefault();
     if (!newName.trim()) return;
+    setAddAgentMessage(null);
     const body = { name: newName.trim(), role: newRole.trim() || 'Agent' };
     if (newParentId) body.parent_id = newParentId;
     api.agentCreate(body)
@@ -152,6 +168,8 @@ export default function Dashboard() {
         setNewName('');
         setNewRole('');
         setNewParentId('');
+        setAddAgentMessage(`"${agent.name}" added. Restart the OpenClaw gateway (port 18789) for it to appear in OpenClaw.`);
+        setTimeout(() => setAddAgentMessage(null), 12000);
       })
       .catch((e) => setError(e.message));
   };
@@ -163,13 +181,24 @@ export default function Dashboard() {
       .catch((e) => setError(e.message));
   };
 
-  const createStandup = () => {
+  const createStandup = (e) => {
+    e?.preventDefault?.();
     setCreatingStandup(true);
     const scheduledAt = standupScheduledAt ? new Date(standupScheduledAt).toISOString() : new Date().toISOString();
-    api.standupCreate({ scheduled_at: scheduledAt, status: 'scheduled' })
+    const outcomesTrim = standupOutcomes.trim();
+    api.standupCreate({ scheduled_at: scheduledAt, status: 'scheduled', title: standupTitle.trim() || undefined, outcomes: outcomesTrim || undefined })
       .then((s) => {
         setStandups((prev) => [s, ...prev]);
         setSelectedStandup(s);
+        setShowCreateStandupModal(false);
+        setStandupTitle('');
+        setStandupOutcomes('');
+        if (outcomesTrim) {
+          return api.standupSendMessage(s.id, { content: outcomesTrim }).then(() => api.standupGet(s.id)).then((updated) => {
+            setSelectedStandup(updated);
+            setStandups((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+          });
+        }
       })
       .catch((e) => setError(e.message))
       .finally(() => setCreatingStandup(false));
@@ -189,6 +218,18 @@ export default function Dashboard() {
       })
       .catch((e) => setError(e.message))
       .finally(() => setDeletingStandupId(null));
+  };
+
+  const deleteAllStandups = () => {
+    if (!window.confirm('Delete all standups and their chat history? This cannot be undone.')) return;
+    setDeletingAllStandups(true);
+    api.standupDeleteAll()
+      .then(() => {
+        setStandups([]);
+        setSelectedStandup(null);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setDeletingAllStandups(false));
   };
 
   const runCoo = () => {
@@ -276,7 +317,9 @@ export default function Dashboard() {
 
   return (
     <div style={{ padding: '2rem', maxWidth: 960 }}>
-      <h1 style={{ marginTop: 0 }}>Dashboard</h1>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1rem' }}>
+        <h1 style={{ marginTop: 0, marginBottom: 0 }}>Dashboard</h1>
+      </div>
 
       {/* Org chart: CEO → COO → delegated agents */}
       <section style={{ marginBottom: '2rem' }}>
@@ -425,27 +468,81 @@ export default function Dashboard() {
             <div style={{ marginBottom: '0.75rem' }}>
               <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>Scheduled standups</span>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.35rem' }}>
-                <input
-                  type="datetime-local"
-                  value={standupScheduledAt}
-                  onChange={(e) => setStandupScheduledAt(e.target.value)}
-                  style={{ padding: '0.4rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: '0.9rem' }}
-                />
                 <button
                   type="button"
-                  onClick={createStandup}
-                  disabled={creatingStandup}
-                  style={{ padding: '0.5rem', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6, cursor: creatingStandup ? 'not-allowed' : 'pointer', fontSize: '0.9rem' }}
+                  onClick={() => setShowCreateStandupModal(true)}
+                  style={{ padding: '0.5rem', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: '0.9rem' }}
                 >
-                  {creatingStandup ? 'Creating…' : 'Create standup'}
+                  Create standup
                 </button>
               </div>
             </div>
+            {showCreateStandupModal && (
+              <div
+                style={{
+                  position: 'fixed',
+                  inset: 0,
+                  background: 'rgba(0,0,0,0.4)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 100,
+                }}
+                onClick={() => !creatingStandup && setShowCreateStandupModal(false)}
+              >
+                <div
+                  style={{
+                    background: 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 12,
+                    padding: '1.25rem',
+                    minWidth: 320,
+                    maxWidth: 420,
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <h3 style={{ margin: '0 0 1rem', fontSize: '1.1rem' }}>New standup</h3>
+                  <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', color: 'var(--muted)' }}>Title (optional)</label>
+                  <input
+                    type="text"
+                    value={standupTitle}
+                    onChange={(e) => setStandupTitle(e.target.value)}
+                    placeholder="e.g. Weekly sync"
+                    style={{ width: '100%', padding: '0.4rem 0.5rem', marginBottom: '0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', boxSizing: 'border-box' }}
+                  />
+                  <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', color: 'var(--muted)' }}>Outcomes (first message to COO)</label>
+                  <textarea
+                    value={standupOutcomes}
+                    onChange={(e) => setStandupOutcomes(e.target.value)}
+                    placeholder="e.g. Deep research on AI trends; Q2 expense summary"
+                    rows={3}
+                    style={{ width: '100%', padding: '0.4rem 0.5rem', marginBottom: '0.75rem', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', resize: 'vertical', boxSizing: 'border-box' }}
+                  />
+                  <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.85rem', color: 'var(--muted)' }}>Scheduled at</label>
+                  <input
+                    type="datetime-local"
+                    value={standupScheduledAt}
+                    onChange={(e) => setStandupScheduledAt(e.target.value)}
+                    style={{ width: '100%', padding: '0.4rem 0.5rem', marginBottom: '1rem', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', boxSizing: 'border-box' }}
+                  />
+                  <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                    <button type="button" onClick={() => !creatingStandup && setShowCreateStandupModal(false)} style={{ padding: '0.4rem 0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', color: 'var(--text)' }}>Cancel</button>
+                    <button type="button" onClick={createStandup} disabled={creatingStandup} style={{ padding: '0.4rem 0.75rem', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6, cursor: creatingStandup ? 'not-allowed' : 'pointer' }}>{creatingStandup ? 'Creating…' : 'Create'}</button>
+                  </div>
+                </div>
+              </div>
+            )}
             <ul style={{ listStyle: 'none', padding: 0, margin: 0, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
               {standups.slice(0, 12).map((s) => (
                 <li
                   key={s.id}
-                  onClick={() => setSelectedStandup(s)}
+                  onClick={() => {
+                    api.standupGet(s.id).then((full) => {
+                      setSelectedStandup(full);
+                      setStandups((prev) => prev.map((x) => (x.id === full.id ? full : x)));
+                    }).catch(() => setSelectedStandup(s));
+                  }}
                   style={{
                     padding: '0.6rem 0.75rem',
                     borderBottom: '1px solid var(--border)',
@@ -483,16 +580,36 @@ export default function Dashboard() {
                 </li>
               ))}
             </ul>
+            {standups.length > 0 && (
+              <div style={{ padding: '0.5rem 0.75rem', borderTop: '1px solid var(--border)' }}>
+                <button
+                  type="button"
+                  onClick={deleteAllStandups}
+                  disabled={deletingAllStandups}
+                  style={{
+                    padding: '0.35rem 0.6rem',
+                    background: 'transparent',
+                    color: 'var(--muted)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 6,
+                    cursor: deletingAllStandups ? 'not-allowed' : 'pointer',
+                    fontSize: '0.8rem',
+                  }}
+                >
+                  {deletingAllStandups ? 'Deleting…' : 'Delete all standups'}
+                </button>
+              </div>
+            )}
             {standups.length === 0 && (
               <p style={{ color: 'var(--muted)', padding: '0.75rem', margin: 0, fontSize: '0.9rem' }}>No standups. Create one above.</p>
             )}
           </div>
-          <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          <div style={{ flex: '1 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.75rem', maxHeight: 'min(70vh, 640px)', minHeight: 320 }}>
             {selectedStandup ? (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
                   <strong style={{ fontSize: '1rem' }}>
-                    COO chat — {new Date(selectedStandup.scheduled_at).toLocaleString()}
+                    COO chat — {selectedStandup.title ? `${selectedStandup.title} · ` : ''}{new Date(selectedStandup.scheduled_at).toLocaleString()}
                   </strong>
                   <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                     <button
@@ -513,19 +630,21 @@ export default function Dashboard() {
                     </button>
                   </span>
                 </div>
-                <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '1rem', minHeight: 280, maxHeight: 420, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                <div className="chat-scroll-panel" style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                   {Array.isArray(selectedStandup.messages) && selectedStandup.messages.length > 0 ? (
                     selectedStandup.messages.map((m) => (
                       <div key={m.id}>
                         <span style={{ fontWeight: 600, color: m.role === 'coo' ? 'var(--accent)' : 'var(--text)', fontSize: '0.9rem' }}>{m.role === 'coo' ? 'COO' : 'You'}:</span>
-                        <p style={{ whiteSpace: 'pre-wrap', margin: '0.2rem 0 0', fontSize: '0.95rem' }}>{m.content}</p>
+                        <div style={{ margin: '0.2rem 0 0', fontSize: '0.95rem' }}>
+                          <ChatMessageContent content={m.content} />
+                        </div>
                       </div>
                     ))
                   ) : (
                     <p style={{ color: 'var(--muted)', margin: 0, fontSize: '0.9rem' }}>No messages yet. Send the day&apos;s tasks to the COO below.</p>
                   )}
                 </div>
-                <form onSubmit={handleStandupMessage} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end' }}>
+                <form onSubmit={handleStandupMessage} style={{ flexShrink: 0, display: 'flex', gap: '0.5rem', alignItems: 'flex-end' }}>
                   <textarea
                     rows={3}
                     value={standupChatInput}
@@ -641,7 +760,10 @@ export default function Dashboard() {
 
       {/* Add agent (optional) */}
       <section>
-        <h2 style={{ fontSize: '1.25rem', marginBottom: '0.75rem' }}>Add agent</h2>
+        <h2 style={{ fontSize: '1.25rem', marginBottom: '0.25rem' }}>Add agent</h2>
+        <p style={{ fontSize: '0.85rem', color: 'var(--muted)', marginBottom: '0.75rem' }}>
+          New agents are added to OpenClaw config and workspace. Restart the OpenClaw gateway (port 18789) for them to appear in OpenClaw.
+        </p>
         <form onSubmit={addAgent} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
           <input
             type="text"
@@ -701,6 +823,28 @@ export default function Dashboard() {
             Add agent
           </button>
         </form>
+        {addAgentMessage && (
+          <div
+            style={{
+              marginTop: '0.5rem',
+              padding: '0.75rem 1rem',
+              background: 'var(--surface)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              fontSize: '0.9rem',
+              color: 'var(--text)',
+            }}
+          >
+            {addAgentMessage}
+            <button
+              type="button"
+              onClick={() => setAddAgentMessage(null)}
+              style={{ marginLeft: '0.75rem', padding: '0.2rem 0.5rem', fontSize: '0.85rem', cursor: 'pointer' }}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
       </section>
     </div>
   );

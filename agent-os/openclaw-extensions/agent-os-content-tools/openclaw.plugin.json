@@ -1,0 +1,20 @@
+{
+  "id": "agent-os-content-tools",
+  "name": "Agent OS Content Tools",
+  "description": "Register summarize_url, generate_image, generate_video tools that call the Agent OS backend. No hardcoded URLs; baseUrl and apiKey from config or env.",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "Agent OS backend base URL (e.g. http://127.0.0.1:3001). Overrides AGENT_OS_API_URL env."
+      },
+      "apiKey": {
+        "type": "string",
+        "description": "Optional. Bearer token for backend auth (overrides TOOLS_API_KEY env)."
+      }
+    }
+  }
+}

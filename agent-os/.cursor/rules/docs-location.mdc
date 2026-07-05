@@ -1,0 +1,19 @@
+---
+description: Where Agent OS documentation lives for Cursor to refer in future
+globs: 
+alwaysApply: true
+---
+
+# Agent OS documentation location
+
+- **Main entry:** `agent-os/README.md` (quick start, API, DB scripts, project layout).
+- **All other docs** are under **`agent-os/knowledgebase/`**:
+  - **knowledgebase/TESTING.md** — restart steps, API test, frontend tests, standup→COO→TechResearcher test, standup UI checklist.
+  - **knowledgebase/GITHUB-SETUP.md** — create GitHub repo and push.
+  - **knowledgebase/IMPLEMENTATION_PLAN.md** — vision, phases, skills, TTS, token monitoring.
+  - **knowledgebase/AGENT_REVIEW_AND_SKILLS.md** — agent review and secure skill recommendations.
+  - **knowledgebase/CONFIGURE-CLAUDE-OPUS.md** — OpenClaw model config (e.g. Claude Opus).
+- **Index:** `knowledgebase/README.md` lists all knowledgebase files.
+- **Do not move:** `openclaw-workspace-templates/`, `openclaw-skills/` (scripts use these paths). `.cursor/agents/` holds subagent instructions.
+
+When answering questions about testing, GitHub setup, implementation plan, agents/skills, or OpenClaw model config, refer to the corresponding file in `knowledgebase/`.
