@@ -2,16 +2,24 @@
 $ErrorActionPreference = "SilentlyContinue"
 $AgentOsRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
+# Kill orphaned backend node processes (each holds its own in-memory workflow cron)
+& (Join-Path $PSScriptRoot "kill-all-backend-processes.ps1")
+
 foreach ($port in @(3001, 3000)) {
-  $conns = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
-  if ($conns) {
+  for ($i = 0; $i -lt 3; $i++) {
+    $conns = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -gt 0 }
+    if (-not $conns) { break }
     foreach ($c in $conns) {
       Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
       Write-Host "Stopped process $($c.OwningProcess) on port $port"
     }
     Start-Sleep -Seconds 2
+  }
+  $remaining = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -gt 0 }
+  if ($remaining) {
+    Write-Host "WARNING: port $port still in use"
   } else {
-    Write-Host "No process on port $port"
+    Write-Host "Port $port is free"
   }
 }
 

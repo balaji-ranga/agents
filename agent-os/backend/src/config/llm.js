@@ -1,7 +1,7 @@
 /**
  * Central LLM config: primary and secondary OpenAPI-compliant endpoints (base URL + API key + model).
- * Each provider uses the same OpenAI SDK shape (e.g. OpenAI, Ollama, DeepSeek). Secondary is tried if primary fails.
- * Use for COO, intent classification, summarize-url (all chat/completions).
+ * Uses the same .env vars as OpenClaw gateway (start-gateway-with-env.js loads backend/.env):
+ * OPENAI_API_KEY, OPENAI_BASE_URL, OPENCLAW_MODEL_PRIMARY — with OPENAI_PRIMARY_* as aliases.
  */
 
 function normalizeBaseUrl(url) {
@@ -22,6 +22,14 @@ function isLocalOllama(baseUrl) {
   }
 }
 
+/** Model slug from OPENCLAW_MODEL_PRIMARY (e.g. openai/gpt-4o-mini → gpt-4o-mini). */
+function modelFromOpenClawPrimary() {
+  const raw = (process.env.OPENCLAW_MODEL_PRIMARY || '').trim();
+  if (!raw) return '';
+  const slash = raw.indexOf('/');
+  return slash >= 0 ? raw.slice(slash + 1).trim() : raw;
+}
+
 /**
  * @returns {{
  *   primary: { baseUrl: string, apiKey: string, model: string },
@@ -30,9 +38,19 @@ function isLocalOllama(baseUrl) {
  */
 export function getLlmConfig() {
   const defaultBase = 'https://api.openai.com/v1';
-  const primaryBase = normalizeBaseUrl(process.env.OPENAI_PRIMARY_BASE_URL || process.env.OPENAI_BASE_URL || process.env.OPENAI_API_URL || defaultBase) || defaultBase;
-  let primaryKey = (process.env.OPENAI_PRIMARY_API_KEY || process.env.OPENAI_API_KEY || '').trim();
-  const primaryModel = (process.env.OPENAI_PRIMARY_MODEL || process.env.OPENAI_DEFAULT_MODEL || 'gpt-4o-mini').trim() || 'gpt-4o-mini';
+  const primaryBase =
+    normalizeBaseUrl(
+      process.env.OPENAI_BASE_URL ||
+        process.env.OPENAI_API_URL ||
+        process.env.OPENAI_PRIMARY_BASE_URL ||
+        defaultBase
+    ) || defaultBase;
+  // Same key OpenClaw gateway reads from backend/.env
+  let primaryKey = (process.env.OPENAI_API_KEY || process.env.OPENAI_PRIMARY_API_KEY || '').trim();
+  const primaryModel =
+    modelFromOpenClawPrimary() ||
+    (process.env.OPENAI_PRIMARY_MODEL || process.env.OPENAI_DEFAULT_MODEL || 'gpt-4o-mini').trim() ||
+    'gpt-4o-mini';
 
   // Ollama (localhost) does not require a real API key; use placeholder so request is sent
   if (!primaryKey && isLocalOllama(primaryBase)) primaryKey = 'ollama';
@@ -74,7 +92,9 @@ export async function chatCompletions({ messages, modelOverride, maxTokens = 102
 
   const primary = endpoints[0];
   if (!primary?.baseUrl) throw new Error('OPENAI_PRIMARY_BASE_URL not set');
-  if (!primary?.apiKey && !isLocalOllama(primary.baseUrl)) throw new Error('OPENAI_PRIMARY_API_KEY or OPENAI_API_KEY not set (required for non-local endpoints)');
+  if (!primary?.apiKey && !isLocalOllama(primary.baseUrl)) {
+    throw new Error('OPENAI_API_KEY or OPENAI_PRIMARY_API_KEY not set in backend/.env (same key used by OpenClaw gateway)');
+  }
 
   let lastErr;
   for (const ep of endpoints) {

@@ -412,6 +412,105 @@ export function initDb() {
     _db.exec(`UPDATE agents SET agent_type = 'standard' WHERE agent_type IS NULL OR agent_type = ''`);
   } catch (_) {}
 
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_workflow_definitions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        owner_user_id TEXT NOT NULL,
+        status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'published')),
+        draft_graph_json TEXT NOT NULL DEFAULT '{"nodes":[],"edges":[]}',
+        published_graph_json TEXT,
+        schedule_cron TEXT,
+        chat_trigger_phrase TEXT,
+        trigger_modes TEXT DEFAULT 'manual',
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_workflow_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        summary TEXT DEFAULT '',
+        changed_by TEXT,
+        changed_by_name TEXT,
+        diff_json TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (definition_id) REFERENCES agent_workflow_definitions(id)
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_workflow_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_number INTEGER NOT NULL,
+        definition_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        status TEXT DEFAULT 'running',
+        trigger TEXT DEFAULT 'manual',
+        progress_pct INTEGER DEFAULT 0,
+        context_json TEXT DEFAULT '{}',
+        standup_id INTEGER,
+        started_at TEXT DEFAULT (datetime('now')),
+        completed_at TEXT,
+        error_message TEXT,
+        updated_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (definition_id) REFERENCES agent_workflow_definitions(id)
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_workflow_run_steps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        node_id TEXT NOT NULL,
+        node_type TEXT NOT NULL,
+        node_label TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending',
+        input_json TEXT,
+        output_json TEXT,
+        delegation_task_id INTEGER,
+        kanban_task_id INTEGER,
+        started_at TEXT,
+        completed_at TEXT,
+        error_message TEXT,
+        FOREIGN KEY (run_id) REFERENCES agent_workflow_runs(id)
+      )
+    `);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_wf_defs_owner ON agent_workflow_definitions(owner_user_id)`);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_wf_audit_def ON agent_workflow_audit(definition_id, created_at DESC)`);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_wf_runs_def ON agent_workflow_runs(definition_id, started_at DESC)`);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_wf_steps_run ON agent_workflow_run_steps(run_id)`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`ALTER TABLE agent_workflow_definitions ADD COLUMN paused INTEGER DEFAULT 0`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_workflow_schedule_ticks (
+        definition_id TEXT NOT NULL,
+        tick_minute TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (definition_id, tick_minute)
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_workflow_schedules (
+        definition_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        workflow_name TEXT DEFAULT '',
+        schedule_cron TEXT NOT NULL,
+        enabled INTEGER DEFAULT 1,
+        updated_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (definition_id) REFERENCES agent_workflow_definitions(id) ON DELETE CASCADE
+      )
+    `);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_wf_schedules_enabled ON agent_workflow_schedules(enabled)`);
+  } catch (_) {}
+
   return _db;
 }
 

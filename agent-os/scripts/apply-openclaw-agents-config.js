@@ -24,6 +24,8 @@ const CONTENT_TOOLS_ALLOW = [
   'kanban_reassign_to_coo',
   'kanban_assign_task',
   'intent_classify_and_delegate',
+  'agent_workflow_list',
+  'agent_workflow_trigger',
 ];
 const CONTENT_TOOLS_CONFIG = { allow: [...CONTENT_TOOLS_ALLOW], deny: ['image'] };
 
@@ -32,7 +34,22 @@ const REMOVE_FROM_ALLOWLIST = new Set(['cron.add', 'cron_add']);
 
 const AGENTS_LIST = [
   { id: 'bala', name: 'Bala', default: true, workspace: toSlash(join(OPENCLAW_DIR, 'workspace')) },
-  { id: 'balserve', name: 'COO', workspace: toSlash(join(OPENCLAW_DIR, 'workspace-balserve')) },
+  { id: 'balserve', name: 'COO', workspace: toSlash(join(OPENCLAW_DIR, 'workspace-balserve')), tools: { ...CONTENT_TOOLS_CONFIG } },
+  {
+    id: 'workflowbuilder',
+    name: 'Workflow Builder',
+    workspace: toSlash(join(OPENCLAW_DIR, 'workspace-workflowbuilder')),
+    tools: {
+      allow: [
+        'agent_workflow_list',
+        'agent_workflow_trigger',
+        'agent_workflow_get_draft',
+        'agent_workflow_mutate',
+        'summarize_url',
+      ],
+      deny: ['image'],
+    },
+  },
   { id: 'techresearcher', name: 'TechResearcher', workspace: toSlash(join(OPENCLAW_DIR, 'workspace-techresearcher')), tools: { ...CONTENT_TOOLS_CONFIG } },
   { id: 'expensemanager', name: 'ExpenseManager', workspace: toSlash(join(OPENCLAW_DIR, 'workspace-expenses')), tools: { ...CONTENT_TOOLS_CONFIG } },
   { id: 'socialasstant', name: 'SocialAssistant', workspace: toSlash(join(OPENCLAW_DIR, 'workspace-socialasstant')), tools: { ...CONTENT_TOOLS_CONFIG } },
@@ -131,7 +148,7 @@ if (!config.models.providers.ollama) {
 if (!config.tools) config.tools = {};
 config.tools.agentToAgent = {
   enabled: true,
-  allow: ['bala', 'balserve', 'techresearcher', 'expensemanager', 'socialasstant'],
+  allow: ['bala', 'balserve', 'workflowbuilder', 'techresearcher', 'expensemanager', 'socialasstant'],
 };
 
 // Remove agents.defaults.subagents if present (can prevent gateway from starting).
@@ -183,6 +200,10 @@ const contentToolNames = [
   'kanban_reassign_to_coo',
   'kanban_assign_task',
   'intent_classify_and_delegate',
+  'agent_workflow_list',
+  'agent_workflow_trigger',
+  'agent_workflow_get_draft',
+  'agent_workflow_mutate',
   'browser',
 ];
 if (!Array.isArray(config.tools.allow)) config.tools.allow = [];

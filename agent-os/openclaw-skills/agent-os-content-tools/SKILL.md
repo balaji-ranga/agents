@@ -12,7 +12,7 @@ Use this skill to call the Agent OS backend for content tools. **Do not hardcode
 
 ## Critical: Invoke as API tools, never via exec
 
-**kanban_move_status**, **kanban_reassign_to_coo**, **kanban_assign_task**, **intent_classify_and_delegate**, **summarize_url**, **generate_image**, and **generate_video** are **registered API tools**. You must **invoke each by its tool name with JSON parameters** (e.g. `kanban_move_status` with `task_id` and `new_status`). The gateway then calls the Agent OS backend. **Do not use the exec tool or run any shell command** to "run" these—they are not commands; they are API tools. Calling them via exec will fail.
+**kanban_move_status**, **kanban_reassign_to_coo**, **kanban_assign_task**, **intent_classify_and_delegate**, **agent_workflow_list**, **agent_workflow_trigger**, **summarize_url**, **generate_image**, and **generate_video** are **registered API tools**. You must **invoke each by its tool name with JSON parameters** (e.g. `kanban_move_status` with `task_id` and `new_status`). The gateway then calls the Agent OS backend. **Do not use the exec tool or run any shell command** to "run" these—they are not commands; they are API tools. Calling them via exec will fail.
 
 ## Tool preference (use before default tools)
 
@@ -40,6 +40,8 @@ Only fall back to web_search, web_fetch, or other default tools when the task do
 - **kanban_reassign_to_coo** — Reassign a task back to the COO. Parameters: `task_id` (required). Use when you cannot complete the task.
 - **kanban_assign_task** — (COO only.) Assign a task to an agent. Parameters: `task_id`, `to_agent_id`.
 - **intent_classify_and_delegate** — (COO only.) Classify message intent and delegate to agents; creates Kanban tasks. Parameters: `message` (required), `standup_id` (optional).
+- **agent_workflow_list** — (COO only.) List published custom workflows and chat trigger phrases. Optional `ceo_user_id`.
+- **agent_workflow_trigger** — (COO only.) Start a custom agent workflow. Parameters: `message` (chat phrase, e.g. `run brain approval test`) or `workflow_id`, optional `ceo_user_id`, optional `input`.
 
 ## Configuration (externalized)
 

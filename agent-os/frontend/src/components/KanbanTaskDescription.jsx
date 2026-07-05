@@ -56,6 +56,10 @@ function linkifyLine(line) {
   return parts;
 }
 
+export function isWorkflowCeoApprovalTask(task) {
+  return String(task?.description || '').includes('node_type: ceo_approval');
+}
+
 export function isCeoJobReviewTask(task) {
   const desc = task?.description || '';
   const title = task?.title || '';

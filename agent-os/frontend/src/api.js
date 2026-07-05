@@ -199,6 +199,36 @@ export const api = {
   adminEnableAgent: (userId, agentId) => post(`/admin/users/${encodeURIComponent(userId)}/agents/${encodeURIComponent(agentId)}/enable`, {}),
   adminDisableAgent: (userId, agentId) => post(`/admin/users/${encodeURIComponent(userId)}/agents/${encodeURIComponent(agentId)}/disable`, {}),
   adminAgentsGrouped: () => get('/admin/agents'),
+  // Agent workflows (custom, separate from job workflows)
+  agentWorkflowList: () => get('/agent-workflows'),
+  agentWorkflowTemplates: () => get('/agent-workflows/meta/templates'),
+  agentWorkflowTemplateGet: (templateId) => get(`/agent-workflows/meta/templates/${encodeURIComponent(templateId)}`),
+  agentWorkflowTaskTypes: () => get('/agent-workflows/meta/task-types'),
+  agentWorkflowGet: (id) => get(`/agent-workflows/${encodeURIComponent(id)}`),
+  agentWorkflowCreate: (body) => post('/agent-workflows', body),
+  agentWorkflowUpdate: (id, body) => patch(`/agent-workflows/${encodeURIComponent(id)}`, body),
+  agentWorkflowPublish: (id) => post(`/agent-workflows/${encodeURIComponent(id)}/publish`, {}),
+  agentWorkflowDelete: (id) => del(`/agent-workflows/${encodeURIComponent(id)}`),
+  agentWorkflowAudit: (id, limit = 50) => get(`/agent-workflows/${encodeURIComponent(id)}/audit?limit=${limit}`),
+  agentWorkflowRuns: (limit = 50) => get(`/agent-workflows/runs?limit=${limit}`),
+  agentWorkflowRunGet: (runId) => get(`/agent-workflows/runs/${runId}`),
+  agentWorkflowRunsForDef: (id, limit = 30) => get(`/agent-workflows/${encodeURIComponent(id)}/runs?limit=${limit}`),
+  agentWorkflowRun: (id, body = {}) => post(`/agent-workflows/${encodeURIComponent(id)}/run`, body),
+  agentWorkflowApprovalRespond: (body) => post('/agent-workflows/approval/respond', body),
+  agentWorkflowPause: (id) => post(`/agent-workflows/${encodeURIComponent(id)}/pause`, {}),
+  agentWorkflowResume: (id) => post(`/agent-workflows/${encodeURIComponent(id)}/resume`, {}),
+  agentWorkflowUpdateTriggers: (id, body) => patch(`/agent-workflows/${encodeURIComponent(id)}/triggers`, body),
+  agentWorkflowRunPause: (runId) => post(`/agent-workflows/runs/${runId}/pause`, {}),
+  agentWorkflowRunDelete: (runId) => del(`/agent-workflows/runs/${runId}`),
+  agentWorkflowRunsPauseAll: (definitionId = null) =>
+    post('/agent-workflows/runs/pause-all', definitionId ? { definition_id: definitionId } : {}),
+  agentWorkflowRunsDeleteAll: (definitionId = null) => {
+    const q = definitionId ? `?definition_id=${encodeURIComponent(definitionId)}` : '';
+    return del(`/agent-workflows/runs/all${q}`);
+  },
+  agentWorkflowAgentChat: (body) => post('/agent-workflows/agent-chat', body),
+  agentWorkflowDraftGet: (id) => get(`/agent-workflows/draft/${encodeURIComponent(id)}`),
+  agentWorkflowMutate: (body) => post('/agent-workflows/mutate', body),
   // Clear OpenClaw sessions for an agent (workspace UI)
   agentSessionsClear: (agentId) => post(`/agents/${encodeURIComponent(agentId)}/sessions/clear`, {}),
 };

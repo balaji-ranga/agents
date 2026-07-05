@@ -12,6 +12,13 @@ import { chatCompletions } from '../config/llm.js';
 import { getDb } from '../db/schema.js';
 import * as meta from '../services/content-tools-meta.js';
 import { scheduleCeoRequestViaOpenClawCron } from '../services/delegation-queue.js';
+import {
+  listChatTriggerableWorkflows,
+  triggerAgentWorkflowForOwner,
+  resolveWorkflowOwnerUserId,
+} from '../services/agent-workflow-chat-tools.js';
+import { applyWorkflowBuilderActions, getWorkflowDraftForAgent } from '../services/agent-workflow-builder.js';
+import { resolveAuthenticatedCeoUserId } from '../middleware/auth.js';
 import jobApplicantTools from './job-applicant-tools.js';
 
 const router = Router();
@@ -27,6 +34,12 @@ function getCallerAgent(req) {
 function getCooAgentId() {
   const row = getDb().prepare('SELECT id FROM agents WHERE is_coo = 1 LIMIT 1').get();
   return row ? row.id : null;
+}
+
+function isWorkflowBuilderCaller(caller) {
+  if (!caller) return false;
+  const id = String(caller.id || '').toLowerCase();
+  return id === 'workflowbuilder';
 }
 const PORT = Number(process.env.PORT) || 3001;
 function getBackendBaseUrl() {
@@ -677,6 +690,142 @@ router.post('/intent-classify-and-delegate', optionalAuth, async (req, res) => {
     const err = { error: e.message };
     logContentTool('intent_classify_and_delegate', requestPayload, err, 'error', source);
     res.status(500).json(err);
+  }
+});
+
+/**
+ * List published agent workflows with chat triggers (COO only).
+ */
+router.post('/agent-workflow-list', optionalAuth, (req, res) => {
+  const source = req.headers['x-openclaw-agent-id'] || req.headers['x-agent-id'] || null;
+  const requestPayload = req.body || {};
+  try {
+    const caller = getCallerAgent(req);
+    if (!caller || !caller.is_coo) {
+      const err = { error: 'Only COO can list agent workflows' };
+      logContentTool('agent_workflow_list', requestPayload, err, 'error', source);
+      return res.status(403).json(err);
+    }
+    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const workflows = listChatTriggerableWorkflows(ownerUserId);
+    const out = { ok: true, ceo_user_id: ownerUserId, workflows, count: workflows.length };
+    logContentTool('agent_workflow_list', requestPayload, out, 'ok', source);
+    res.json(out);
+  } catch (e) {
+    const err = { error: e.message };
+    logContentTool('agent_workflow_list', requestPayload, err, 'error', source);
+    res.status(500).json(err);
+  }
+});
+
+/**
+ * Trigger a published agent workflow by chat phrase or workflow_id (COO only).
+ */
+router.post('/agent-workflow-trigger', optionalAuth, async (req, res) => {
+  const source = req.headers['x-openclaw-agent-id'] || req.headers['x-agent-id'] || null;
+  const requestPayload = req.body || {};
+  try {
+    const caller = getCallerAgent(req);
+    if (!caller || !caller.is_coo) {
+      const err = { error: 'Only COO can trigger agent workflows' };
+      logContentTool('agent_workflow_trigger', requestPayload, err, 'error', source);
+      return res.status(403).json(err);
+    }
+    const message = (requestPayload.message || requestPayload.input || '').toString().trim();
+    const workflowId = requestPayload.workflow_id || requestPayload.workflowId || null;
+    if (!message && !workflowId) {
+      const err = { error: 'message or workflow_id required' };
+      logContentTool('agent_workflow_trigger', requestPayload, err, 'error', source);
+      return res.status(400).json(err);
+    }
+    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const run = await triggerAgentWorkflowForOwner(ownerUserId, {
+      message,
+      workflow_id: workflowId,
+      input: message,
+      actor: { id: caller.id, name: caller.name, type: 'coo' },
+    });
+    const out = {
+      ok: true,
+      run_id: run.id,
+      run_number: run.run_number,
+      definition_id: run.definition_id,
+      definition_name: run.definition_name,
+      status: run.status,
+      ceo_user_id: ownerUserId,
+    };
+    logContentTool('agent_workflow_trigger', requestPayload, out, 'ok', source);
+    res.json(out);
+  } catch (e) {
+    const err = { error: e.message };
+    logContentTool('agent_workflow_trigger', requestPayload, err, 'error', source);
+    res.status(400).json(err);
+  }
+});
+
+/**
+ * Get workflow draft graph (Workflow Builder agent only).
+ */
+router.post('/agent-workflow-get-draft', optionalAuth, (req, res) => {
+  const source = req.headers['x-openclaw-agent-id'] || req.headers['x-agent-id'] || null;
+  const requestPayload = req.body || {};
+  try {
+    const caller = getCallerAgent(req);
+    if (!isWorkflowBuilderCaller(caller)) {
+      const err = { error: 'Only Workflow Builder agent can get workflow drafts via this tool' };
+      logContentTool('agent_workflow_get_draft', requestPayload, err, 'error', source);
+      return res.status(403).json(err);
+    }
+    const workflowId = requestPayload.workflow_id || requestPayload.workflowId;
+    if (!workflowId) {
+      const err = { error: 'workflow_id required' };
+      logContentTool('agent_workflow_get_draft', requestPayload, err, 'error', source);
+      return res.status(400).json(err);
+    }
+    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const out = { ok: true, ...getWorkflowDraftForAgent(ownerUserId, workflowId) };
+    logContentTool('agent_workflow_get_draft', requestPayload, out, 'ok', source);
+    res.json(out);
+  } catch (e) {
+    const err = { error: e.message };
+    logContentTool('agent_workflow_get_draft', requestPayload, err, 'error', source);
+    res.status(400).json(err);
+  }
+});
+
+/**
+ * Mutate workflow draft (Workflow Builder agent only).
+ */
+router.post('/agent-workflow-mutate', optionalAuth, async (req, res) => {
+  const source = req.headers['x-openclaw-agent-id'] || req.headers['x-agent-id'] || null;
+  const requestPayload = req.body || {};
+  try {
+    const caller = getCallerAgent(req);
+    if (!isWorkflowBuilderCaller(caller)) {
+      const err = { error: 'Only Workflow Builder agent can mutate workflows via this tool' };
+      logContentTool('agent_workflow_mutate', requestPayload, err, 'error', source);
+      return res.status(403).json(err);
+    }
+    const actions = requestPayload.actions;
+    if (!Array.isArray(actions) || !actions.length) {
+      const err = { error: 'actions array required' };
+      logContentTool('agent_workflow_mutate', requestPayload, err, 'error', source);
+      return res.status(400).json(err);
+    }
+    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const result = await applyWorkflowBuilderActions(
+      ownerUserId,
+      requestPayload.workflow_id || requestPayload.workflowId || null,
+      actions,
+      { id: caller.id, name: caller.name, type: 'workflow_builder' }
+    );
+    const out = { ok: true, ...result };
+    logContentTool('agent_workflow_mutate', requestPayload, out, 'ok', source);
+    res.json(out);
+  } catch (e) {
+    const err = { error: e.message };
+    logContentTool('agent_workflow_mutate', requestPayload, err, 'error', source);
+    res.status(400).json(err);
   }
 });
 

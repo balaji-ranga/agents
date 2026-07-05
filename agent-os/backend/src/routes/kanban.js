@@ -7,12 +7,35 @@ import { Router } from 'express';
 import { getDb } from '../db/schema.js';
 import * as openclaw from '../gateway/openclaw.js';
 import { resolveKanbanTaskArtifacts } from '../services/kanban-artifacts.js';
+import { parseAgentWorkflowMeta } from '../services/agent-workflow-kanban.js';
 
 const router = Router();
 const VALID_STATUSES = ['open', 'awaiting_confirmation', 'in_progress', 'completed', 'failed'];
 
 function db() {
   return getDb();
+}
+
+function resolveWorkflowStepIo(description) {
+  const meta = parseAgentWorkflowMeta(description);
+  if (!meta.run_id || !meta.node_id) return { input: null, output: null };
+  const step = db()
+    .prepare('SELECT input_json, output_json FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?')
+    .get(meta.run_id, meta.node_id);
+  if (!step) return { input: null, output: null };
+  let input = null;
+  let output = null;
+  try {
+    if (step.input_json) input = JSON.parse(step.input_json);
+  } catch {
+    input = { _raw: step.input_json };
+  }
+  try {
+    if (step.output_json) output = JSON.parse(step.output_json);
+  } catch {
+    output = { _raw: step.output_json };
+  }
+  return { input, output };
 }
 
 function parseViewRange(view, from, to) {
@@ -60,7 +83,7 @@ router.get('/tasks', (req, res) => {
     const ceoReviewAlways =
       " OR (k.status = 'awaiting_confirmation' AND k.description LIKE 'ceo_review_profile:%')";
     const workflowAlways =
-      " OR k.description LIKE '[job_pipeline:%' OR k.created_by IN ('job_workflow', 'job_pipeline')";
+      " OR k.description LIKE '[job_pipeline:%' OR k.description LIKE '%[agent_workflow:%' OR k.created_by IN ('job_workflow', 'job_pipeline', 'agent_workflow', 'agent_workflow_ceo')";
     if (range) {
       const startSql = range.start.replace('T', ' ').replace(/\.\d{3}Z$/, '').slice(0, 19);
       const endSql = range.end.replace('T', ' ').replace(/\.\d{3}Z$/, '').slice(0, 19);
@@ -128,11 +151,14 @@ router.get('/tasks/:id', (req, res) => {
         : null,
       messages
     );
+    const { input: workflow_step_input, output: workflow_step_output } = resolveWorkflowStepIo(task.description);
     res.json({
       ...task,
       messages,
       delegation_prompt,
       delegation_response,
+      workflow_step_input,
+      workflow_step_output,
       artifacts,
       artifact_groups: groups,
       artifact_count,

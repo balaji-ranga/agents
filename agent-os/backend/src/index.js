@@ -19,19 +19,23 @@ import broadcastRoutes from './routes/broadcast.js';
 import kanbanRoutes from './routes/kanban.js';
 import mediaRoutes from './routes/media.js';
 import jobApplicantRoutes from './routes/job-applicant.js';
+import agentWorkflowRoutes from './routes/agent-workflows.js';
 import authRoutes from './routes/auth.js';
 import adminRoutes from './routes/admin.js';
 import { attachAuthUser } from './middleware/auth.js';
 import { ensureDefaultAdmin, ensureBalaCeoUser, grantStandardAgents } from './services/users.js';
 import { initDb, getDb } from './db/schema.js';
 import { seedDefaultAgentsIfEmpty } from './db/seed-default-agents.js';
-import { seedContentToolsMetaIfEmpty, seedKanbanToolsIfMissing, updateKanbanToolPurposes } from './db/seed-content-tools-meta.js';
+import { seedContentToolsMetaIfEmpty, seedKanbanToolsIfMissing, seedWorkflowToolsIfMissing, updateKanbanToolPurposes } from './db/seed-content-tools-meta.js';
 import { seedJobApplicantToolsIfMissing } from './db/seed-job-applicant-tools.js';
 import { writeOpenClawToolsList } from './services/content-tools-meta.js';
 import { runScheduledStandup } from './cron/standup.js';
 import { processPendingDelegationTasks } from './services/delegation-queue.js';
 import { runPipelineTick, runPipelineTickAll } from './services/job-applicant-pipeline.js';
 import { getLastIntentDebug } from './services/intent-classifier.js';
+import { initAgentWorkflowScheduler } from './services/agent-workflow-scheduler.js';
+import { syncWorkflowScheduleRegistry } from './services/agent-workflow-store.js';
+import { seedWorkflowBuilderAgent } from '../scripts/seed-workflow-builder-agent.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
@@ -51,9 +55,15 @@ try {
 } catch (_) {}
 seedContentToolsMetaIfEmpty();
 seedKanbanToolsIfMissing();
+seedWorkflowToolsIfMissing();
 updateKanbanToolPurposes();
 seedJobApplicantToolsIfMissing();
 writeOpenClawToolsList();
+try {
+  seedWorkflowBuilderAgent();
+} catch (e) {
+  console.warn('[startup] workflow builder agent seed:', e.message);
+}
 
 const healthHandler = (req, res) => {
   res.json({ status: 'ok', service: 'agent-os-backend', timestamp: new Date().toISOString() });
@@ -82,6 +92,7 @@ apiRouter.use('/tools', toolsRoutes);
 apiRouter.use('/broadcast', broadcastRoutes);
 apiRouter.use('/kanban', kanbanRoutes);
 apiRouter.use('/job-applicant', jobApplicantRoutes);
+apiRouter.use('/agent-workflows', agentWorkflowRoutes);
 apiRouter.use('/media/openclaw', mediaRoutes);
 app.use('/api', apiRouter);
 
@@ -95,6 +106,7 @@ app.use('/tools', toolsRoutes);
 app.use('/broadcast', broadcastRoutes);
 app.use('/kanban', kanbanRoutes);
 app.use('/job-applicant', jobApplicantRoutes);
+app.use('/agent-workflows', agentWorkflowRoutes);
 app.use('/media/openclaw', mediaRoutes);
 
 const standupSchedule = process.env.STANDUP_CRON_SCHEDULE || '0 9 * * *';
@@ -138,10 +150,13 @@ if (cron.validate(jobPipelineCron)) {
   console.log('Job Applicant pipeline cron scheduled:', jobPipelineCron);
 }
 
+syncWorkflowScheduleRegistry();
+initAgentWorkflowScheduler();
+
 app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
 app.listen(PORT, () => {
-  console.log(`Agent OS backend listening on http://127.0.0.1:${PORT}`);
+  console.log(`Agent OS backend listening on http://127.0.0.1:${PORT} (pid ${process.pid})`);
 });

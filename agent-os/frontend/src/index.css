@@ -27,6 +27,76 @@ body {
 }
 .app-nav {
   flex-shrink: 0;
+  width: 200px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 1rem 0;
+  transition: width 0.2s ease;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.app-nav.collapsed {
+  width: 52px;
+}
+.app-nav-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0.75rem 0.75rem;
+  gap: 0.35rem;
+}
+.nav-toggle {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+.app-nav.collapsed .app-nav-header {
+  justify-content: center;
+  padding: 0 0.35rem 0.75rem;
+}
+.nav-link {
+  display: block;
+  padding: 0.5rem 1rem;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-link:hover {
+  color: var(--text);
+}
+.nav-link.active {
+  color: var(--accent);
+}
+.app-nav.collapsed .nav-link {
+  text-align: center;
+  padding: 0.45rem 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.nav-logout {
+  display: block;
+  margin: 1rem 1rem 0;
+  padding: 0.35rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  width: calc(100% - 2rem);
+}
+.app-nav.collapsed .nav-logout {
+  width: calc(100% - 0.7rem);
+  margin: 1rem 0.35rem 0;
+  padding: 0.35rem 0.2rem;
 }
 .app-main {
   flex: 1;
@@ -132,4 +202,802 @@ button {
   overflow-y: auto;
   flex: 1;
   min-height: 0;
+}
+
+/* Agent workflow editor (n8n-style) */
+.page-wf-editor {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.wf-editor-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.wf-editor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.wf-editor-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.wf-run-input {
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  min-width: 180px;
+}
+
+.wf-editor-body {
+  display: grid;
+  grid-template-columns: 220px 1fr 280px;
+  flex: 1;
+  min-height: 0;
+}
+
+.wf-palette {
+  border-right: 1px solid var(--border);
+  padding: 0.75rem;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+.wf-palette h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.wf-palette-item {
+  padding: 0.5rem 0.65rem;
+  margin-bottom: 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  cursor: grab;
+  background: var(--bg);
+}
+
+.wf-palette-item small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.7rem;
+  margin-top: 2px;
+}
+
+.wf-agent-list {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.wf-agent-chip {
+  border-left-color: #2563eb !important;
+  font-size: 0.8rem;
+}
+
+.wf-canvas {
+  min-height: 0;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.wf-canvas .react-flow {
+  width: 100%;
+  height: 100%;
+}
+
+/* React Flow controls — dark theme (default panel is white) */
+.wf-canvas .react-flow__controls {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.wf-canvas .react-flow__controls-button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  fill: var(--text);
+  color: var(--text);
+}
+
+.wf-canvas .react-flow__controls-button:hover {
+  background: var(--bg);
+}
+
+.wf-canvas .react-flow__minimap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.wf-sidebar-right {
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--surface);
+  min-height: 0;
+  height: 100%;
+  color: var(--text);
+}
+
+.wf-step-id {
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 0.75rem;
+}
+
+.wf-step-id-label {
+  display: block;
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.25rem;
+}
+
+.wf-step-id-value {
+  display: block;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.wf-step-id small {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.wf-props {
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.wf-props h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+}
+
+.wf-field {
+  display: block;
+  margin-bottom: 0.75rem;
+  font-size: 0.8rem;
+}
+
+.wf-field input,
+.wf-field select,
+.wf-field textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.4rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: inherit;
+  box-sizing: border-box;
+}
+
+.wf-field small {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.wf-audit {
+  padding: 0.75rem;
+}
+
+.wf-audit ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.wf-audit li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8rem;
+}
+
+.wf-btn,
+.wf-btn-primary,
+.wf-btn-accent,
+.wf-btn-danger {
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 0.85rem;
+  background: var(--surface);
+  color: inherit;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.wf-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.wf-btn-accent {
+  background: #16a34a;
+  border-color: #16a34a;
+  color: #fff;
+}
+
+.wf-btn-danger {
+  background: transparent;
+  color: #dc2626;
+  border-color: #dc2626;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.wf-error {
+  background: #dc262622;
+  color: #dc2626;
+  padding: 0.5rem 1rem;
+  margin: 0.5rem 1rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.action-feedback {
+  position: fixed;
+  top: 4.5rem;
+  right: 1rem;
+  z-index: 2000;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  max-width: min(420px, calc(100vw - 2rem));
+  padding: 0.65rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  animation: action-feedback-in 0.2s ease-out;
+}
+
+@keyframes action-feedback-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.action-feedback--success {
+  background: #16a34a18;
+  color: #15803d;
+  border: 1px solid #16a34a55;
+}
+
+.action-feedback--error {
+  background: #dc262618;
+  color: #b91c1c;
+  border: 1px solid #dc262655;
+}
+
+.action-feedback-icon {
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.action-feedback-text {
+  flex: 1;
+}
+
+.action-feedback-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 0.15rem;
+  color: inherit;
+  opacity: 0.7;
+}
+
+.action-feedback-dismiss:hover {
+  opacity: 1;
+}
+
+.wf-status {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 999;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.wf-status-draft {
+  background: #a3a3a322;
+  color: #737373;
+}
+
+.wf-status-published {
+  background: #16a34a22;
+  color: #16a34a;
+}
+
+.wf-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.wf-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  background: var(--surface);
+}
+
+.wf-card-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.wf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.wf-table th,
+.wf-table td {
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.wf-steps {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.wf-steps li {
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+  cursor: help;
+}
+
+.wf-io-panel {
+  padding: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.wf-io-panel h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.wf-io-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px dashed var(--border);
+}
+
+.wf-io-label {
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+
+.wf-req {
+  color: #dc2626;
+  margin-left: 2px;
+}
+
+.wf-io-row input,
+.wf-io-row select,
+.wf-io-row textarea {
+  padding: 0.35rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: inherit;
+  font-size: 0.8rem;
+}
+
+.wf-output-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.wf-output-list li {
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.wf-output-list small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.wf-io-empty,
+.wf-io-hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* Compact Kanban board */
+.kanban-board-wrap {
+  overflow-x: hidden;
+  margin-top: 1rem;
+}
+.kanban-board-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  border: 1px solid var(--border);
+}
+.kanban-board-table th,
+.kanban-board-table td {
+  border: 1px solid var(--border);
+  vertical-align: top;
+  padding: 0.25rem;
+  font-size: 0.72rem;
+}
+.kanban-board-table th {
+  background: var(--surface);
+  padding: 0.35rem 0.25rem;
+  font-weight: 600;
+}
+.kanban-col-agent {
+  width: 72px;
+}
+.kanban-col-status {
+  width: calc((100% - 88px) / 5);
+}
+.kanban-card-compact {
+  padding: 0.28rem 0.35rem;
+  margin-bottom: 0.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: grab;
+  font-size: 0.68rem;
+  line-height: 1.25;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.25rem;
+}
+.kanban-card-compact .kanban-card-title {
+  font-weight: 600;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+.kanban-card-compact input[type='checkbox'] {
+  margin-top: 2px;
+  flex-shrink: 0;
+  transform: scale(0.85);
+}
+.kanban-task-wrap {
+  display: block;
+}
+
+.hover-fixed-tooltip,
+.kanban-task-tooltip {
+  min-width: 220px;
+  max-height: min(420px, 70vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  touch-action: pan-y;
+}
+
+.kanban-task-tooltip {
+  max-width: 360px;
+}
+.kanban-task-tooltip-title {
+  font-weight: 700;
+  font-size: 0.8rem;
+  margin-bottom: 0.35rem;
+}
+.kanban-task-tooltip-meta {
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+.kanban-task-tooltip-body {
+  font-size: 0.68rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: inherit;
+  color: var(--text);
+}
+
+.wf-step-io {
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.wf-step-hover-wrap {
+  position: relative;
+}
+
+.hover-fixed-tooltip.wf-step-tooltip,
+.wf-step-tooltip {
+  min-width: 280px;
+  max-height: min(420px, 70vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font-size: 0.78rem;
+  pointer-events: auto;
+  touch-action: pan-y;
+}
+
+.wf-step-tooltip-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.wf-step-tooltip-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.wf-step-tooltip-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0.35rem;
+}
+
+.wf-step-tooltip-block {
+  margin-bottom: 0.65rem;
+}
+
+.wf-step-tooltip-section-title {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+
+.wf-step-tooltip-body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.72rem;
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+}
+
+.wf-step-tooltip-meta {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.wf-step-tooltip-error {
+  margin-top: 0.5rem;
+  color: #dc2626;
+  font-size: 0.75rem;
+}
+
+.wf-io-detail-block {
+  margin-top: 0.5rem;
+}
+
+.wf-io-detail-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.wf-io-detail-subtitle {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0.35rem 0 0.15rem;
+}
+
+.wf-io-detail-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  font-family: ui-monospace, monospace;
+}
+
+/* Workflow Builder agent floating chat */
+.wf-agent-fab {
+  position: fixed;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, #6366f1 0%, #7c3aed 100%);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.45);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.wf-agent-fab:hover {
+  filter: brightness(1.08);
+}
+
+.wf-agent-fab-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.wf-agent-panel {
+  position: fixed;
+  bottom: 4.5rem;
+  right: 1.25rem;
+  z-index: 1201;
+  width: min(420px, calc(100vw - 2rem));
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.wf-agent-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.wf-agent-panel-meta {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 0.2rem;
+}
+
+.wf-agent-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 1.4rem;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 0.25rem;
+}
+
+.wf-agent-messages {
+  flex: 1;
+  min-height: 120px;
+  padding: 0.75rem;
+  overflow-y: auto;
+}
+
+.wf-agent-hint {
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.45;
+  margin: 0;
+}
+
+.wf-agent-msg {
+  margin-bottom: 0.65rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.wf-agent-msg-user {
+  background: rgba(124, 58, 237, 0.15);
+  margin-left: 1rem;
+}
+
+.wf-agent-msg-assistant {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  margin-right: 0.5rem;
+}
+
+.wf-agent-thinking {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.wf-agent-error {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.wf-agent-input-row {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.65rem;
+  border-top: 1px solid var(--border);
+  align-items: flex-end;
+}
+
+.wf-agent-input-row textarea {
+  flex: 1;
+  resize: none;
+  padding: 0.45rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: inherit;
+  font-size: 0.85rem;
+  font-family: inherit;
 }

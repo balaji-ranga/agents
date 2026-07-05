@@ -1,9 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
 import { Link } from 'react-router-dom';
-import KanbanTaskDescription, { isCeoJobReviewTask, parseCeoReviewContext } from '../components/KanbanTaskDescription.jsx';
+import KanbanTaskDescription, { isCeoJobReviewTask, isWorkflowCeoApprovalTask, parseCeoReviewContext } from '../components/KanbanTaskDescription.jsx';
 import KanbanTaskArtifacts from '../components/KanbanTaskArtifacts.jsx';
+import KanbanTaskTooltip from '../components/KanbanTaskTooltip.jsx';
+import { WorkflowIoDetailBlock } from '../components/WorkflowStepTooltip.jsx';
 import { formatLocalDateTime } from '../utils/formatDateTime.js';
+import ActionFeedbackBanner from '../components/ActionFeedbackBanner.jsx';
+import { useActionFeedback } from '../hooks/useActionFeedback.js';
 
 const STATUSES = ['open', 'awaiting_confirmation', 'in_progress', 'completed', 'failed'];
 const STATUS_LABELS = {
@@ -26,7 +30,7 @@ export default function Kanban() {
   const [rangeFrom, setRangeFrom] = useState('');
   const [rangeTo, setRangeTo] = useState('');
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const { feedback, showSuccess, showError, clearFeedback } = useActionFeedback();
   const [selectedTask, setSelectedTask] = useState(null);
   const [taskDetail, setTaskDetail] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -50,6 +54,8 @@ export default function Kanban() {
   const [reviewQueue, setReviewQueue] = useState(null);
   const [includingJobId, setIncludingJobId] = useState(null);
   const [pipelineStatus, setPipelineStatus] = useState(null);
+  const [wfApprovalComment, setWfApprovalComment] = useState('');
+  const [wfApproving, setWfApproving] = useState(false);
   const [drawerTab, setDrawerTab] = useState('details');
   const taskChatScrollRef = useRef(null);
 
@@ -73,11 +79,13 @@ export default function Kanban() {
     setDeleting(true);
     api.kanbanTasksDeleteBulk([...selectedTaskIds])
       .then(() => {
+        const n = selectedTaskIds.size;
         setSelectedTaskIds(new Set());
         fetchTasks();
         if (selectedTask && selectedTaskIds.has(selectedTask.id)) setSelectedTask(null);
+        showSuccess(`Deleted ${n} task(s)`);
       })
-      .catch((err) => setError(err.message || 'Delete failed'))
+      .catch((err) => showError(err.message || 'Delete failed'))
       .finally(() => setDeleting(false));
   };
 
@@ -188,8 +196,13 @@ export default function Kanban() {
     const task = tasks.find((t) => String(t.id) === taskId);
     if (!task || task.status === toStatus) return;
     api.kanbanTaskUpdate(Number(taskId), { status: toStatus })
-      .then(() => { fetchTasks(); setDraggingTask(null); if (selectedTask?.id === Number(taskId)) setTaskDetail((d) => (d ? { ...d, status: toStatus } : d)); })
-      .catch(() => {});
+      .then(() => {
+        fetchTasks();
+        setDraggingTask(null);
+        if (selectedTask?.id === Number(taskId)) setTaskDetail((d) => (d ? { ...d, status: toStatus } : d));
+        showSuccess(`Task moved to ${STATUS_LABELS[toStatus] || toStatus}`);
+      })
+      .catch((err) => showError(err.message || 'Failed to move task'));
   };
 
   const handleCreate = () => {
@@ -214,8 +227,12 @@ export default function Kanban() {
           setCreateDesc('');
           setCreateAssignTo('coo');
           fetchTasks();
+          showSuccess('Task sent to COO');
         })
-        .catch((e) => setCreateError(e.message || 'Failed'))
+        .catch((e) => {
+          setCreateError(e.message || 'Failed');
+          showError(e.message || 'Failed to create task');
+        })
         .finally(() => setCreateSubmitting(false));
     } else {
       api.kanbanTaskCreate({
@@ -229,8 +246,12 @@ export default function Kanban() {
           setCreateDesc('');
           setCreateAssignTo('coo');
           fetchTasks();
+          showSuccess('Task created');
         })
-        .catch((e) => setCreateError(e.message || 'Failed'))
+        .catch((e) => {
+          setCreateError(e.message || 'Failed');
+          showError(e.message || 'Failed to create task');
+        })
         .finally(() => setCreateSubmitting(false));
     }
   };
@@ -239,8 +260,10 @@ export default function Kanban() {
     const desc = taskDetail?.description || selectedTask?.description || '';
     const { profileId, ceoUserId, workflowId } = parseCeoReviewContext(desc);
     if (!profileId) {
-      setApproveError('Could not find profile_id in task. Open a CEO Review task from job pipeline.');
+      const msg = 'Could not find profile_id in task. Open a CEO Review task from job pipeline.';
+      setApproveError(msg);
       setApproveSuccess(null);
+      showError(msg);
       return;
     }
     setApprovingReview(true);
@@ -259,6 +282,7 @@ export default function Kanban() {
             ? `Approved ${result.count} job(s). Application Agent task #${result.prefill_kanban?.kanban_task_id || 'queued'}.`
             : 'Review closed. No jobs were awaiting approval.');
         setApproveSuccess(msg);
+        showSuccess(msg);
         return api.kanbanTaskGet(selectedTask.id).then((detail) => ({ detail, result }));
       })
       .then(({ detail, result }) => {
@@ -276,8 +300,10 @@ export default function Kanban() {
         }
       })
       .catch((err) => {
-        setApproveError(err?.message || 'Approve failed');
+        const msg = err?.message || 'Approve failed';
+        setApproveError(msg);
         setApproveSuccess(null);
+        showError(msg);
       })
       .finally(() => setApprovingReview(false));
   };
@@ -294,17 +320,22 @@ export default function Kanban() {
         ceo_user_id: ceoUserId || undefined,
       })
       .then((result) => {
-        setApproveSuccess(
+        const msg =
           result?.message ||
-            `Included ${result?.included_count || 1} job(s) — now awaiting your approval.`
-        );
+          `Included ${result?.included_count || 1} job(s) — now awaiting your approval.`;
+        setApproveSuccess(msg);
+        showSuccess(msg);
         return Promise.all([
           api.jobApplicantReviewQueue(profileId, ceoUserId || 'default').then(setReviewQueue),
           selectedTask ? api.kanbanTaskGet(selectedTask.id).then(setTaskDetail) : Promise.resolve(),
         ]);
       })
       .then(() => fetchTasks())
-      .catch((err) => setApproveError(err?.message || 'Include failed'))
+      .catch((err) => {
+        const msg = err?.message || 'Include failed';
+        setApproveError(msg);
+        showError(msg);
+      })
       .finally(() => setIncludingJobId(null));
   };
 
@@ -330,9 +361,12 @@ export default function Kanban() {
       .then((detail) => {
         setTaskDetail(detail);
         setMessageInput('');
+        showSuccess('Message sent');
       })
       .catch((err) => {
-        setTaskChatError(err?.message || 'Failed to send message');
+        const msg = err?.message || 'Failed to send message';
+        setTaskChatError(msg);
+        showError(msg);
       })
       .finally(() => setSendingMessage(false));
   };
@@ -343,8 +377,42 @@ export default function Kanban() {
       .then(() => {
         fetchTasks();
         if (selectedTask?.id === task.id) api.kanbanTaskGet(task.id).then(setTaskDetail);
+        showSuccess('Task reopened');
       })
+      .catch((err) => showError(err.message || 'Failed to reopen task'))
       .finally(() => setReopeningId(null));
+  };
+
+  const selectedIsWorkflowApproval =
+    selectedTask &&
+    (taskDetail?.status ?? selectedTask.status) === 'awaiting_confirmation' &&
+    isWorkflowCeoApprovalTask(taskDetail || selectedTask);
+
+  const respondWorkflowApproval = (decision) => {
+    if (!selectedTask) return;
+    setWfApproving(true);
+    setApproveError(null);
+    setApproveSuccess(null);
+    api
+      .agentWorkflowApprovalRespond({
+        kanban_task_id: selectedTask.id,
+        decision,
+        comment: wfApprovalComment.trim(),
+      })
+      .then((result) => {
+        const msg = `Workflow ${result.decision}${wfApprovalComment ? ' — comment saved' : ''}`;
+        setApproveSuccess(msg);
+        showSuccess(msg);
+        setWfApprovalComment('');
+        return api.kanbanTaskGet(selectedTask.id);
+      })
+      .then(setTaskDetail)
+      .then(() => fetchTasks())
+      .catch((e) => {
+        setApproveError(e.message);
+        showError(e.message || 'Workflow approval failed');
+      })
+      .finally(() => setWfApproving(false));
   };
 
   const selectedIsCeoReview =
@@ -357,6 +425,7 @@ export default function Kanban() {
 
   return (
     <div style={{ padding: '1rem', maxWidth: '100%', overflow: 'auto' }}>
+      <ActionFeedbackBanner feedback={feedback} onDismiss={clearFeedback} />
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
         <h1 style={{ margin: 0, fontSize: '1.5rem' }}>Kanban</h1>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -545,29 +614,25 @@ export default function Kanban() {
         </div>
       )}
 
-      {error && <div style={{ color: 'var(--error)', marginBottom: '0.5rem' }}>{error}</div>}
       {loading && <div style={{ color: 'var(--muted)' }}>Loading…</div>}
 
-      <div style={{ overflowX: 'auto', marginTop: '1rem' }}>
-        <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', border: '1px solid var(--border)' }}>
+      <div className="kanban-board-wrap">
+        <table className="kanban-board-table">
           <thead>
             <tr>
-              <th style={{ padding: '0.5rem', border: '1px solid var(--border)', background: 'var(--surface)', width: 44 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+              <th style={{ width: 36 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 2, cursor: 'pointer' }}>
                   <input
                     type="checkbox"
                     checked={tasks.length > 0 && selectedTaskIds.size === tasks.length}
                     onChange={selectAllTasks}
                     title="Select all"
                   />
-                  <span style={{ fontSize: '0.75rem' }}>All</span>
                 </label>
               </th>
-              <th style={{ padding: '0.5rem', border: '1px solid var(--border)', background: 'var(--surface)', textAlign: 'left', minWidth: 120 }}>
-                Agent
-              </th>
+              <th className="kanban-col-agent">Agent</th>
               {STATUSES.map((s) => (
-                <th key={s} style={{ padding: '0.5rem', border: '1px solid var(--border)', background: 'var(--surface)', minWidth: 140 }}>
+                <th key={s} className="kanban-col-status">
                   {STATUS_LABELS[s]}
                 </th>
               ))}
@@ -576,8 +641,8 @@ export default function Kanban() {
           <tbody>
             {agentIds.map((aid) => (
               <tr key={aid}>
-                <td style={{ padding: '0.5rem', border: '1px solid var(--border)' }} />
-                <td style={{ padding: '0.5rem', border: '1px solid var(--border)', fontWeight: 500 }}>{agentName(aid)}</td>
+                <td />
+                <td style={{ fontWeight: 500, wordBreak: 'break-word' }}>{agentName(aid)}</td>
                 {STATUSES.map((status) => (
                   <td
                     key={status}
@@ -585,76 +650,44 @@ export default function Kanban() {
                     onDragLeave={handleDragLeave}
                     onDrop={(e) => handleDrop(e, status)}
                     style={{
-                      padding: '0.5rem',
-                      border: '1px solid var(--border)',
-                      verticalAlign: 'top',
-                      minWidth: 140,
                       background: dropTargetStatus === status ? 'rgba(59, 130, 246, 0.1)' : undefined,
                     }}
                   >
                     {(byAgentAndStatus[aid]?.[status] || []).map((t) => (
-                      <div
-                        key={t.id}
-                        draggable
-                        onDragStart={(e) => handleDragStart(e, t)}
-                        onDragEnd={handleDragEnd}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setSelectedTask(t)}
-                        onKeyDown={(e) => e.key === 'Enter' && setSelectedTask(t)}
-                        style={{
-                          padding: '0.5rem',
-                          marginBottom: '0.35rem',
-                          background: draggingTask?.id === t.id ? 'var(--border)' : 'var(--surface)',
-                          border: '1px solid var(--border)',
-                          borderRadius: 6,
-                          cursor: draggingTask?.id === t.id ? 'grabbing' : 'grab',
-                          fontSize: '0.9rem',
-                          opacity: draggingTask?.id === t.id ? 0.8 : 1,
-                          display: 'flex',
-                          alignItems: 'flex-start',
-                          gap: '0.5rem',
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={selectedTaskIds.has(t.id)}
-                          onChange={(e) => toggleTaskSelection(t.id, e)}
-                          onClick={(e) => e.stopPropagation()}
-                          title="Select task"
-                        />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontWeight: 500 }}>{t.title || '(no title)'}</div>
-                          {isCeoJobReviewTask(t) && (
-                            <span
-                              style={{
-                                display: 'inline-block',
-                                marginTop: 4,
-                                fontSize: '0.65rem',
-                                padding: '2px 6px',
-                                borderRadius: 4,
-                                background: 'var(--accent)',
-                                color: 'white',
-                                fontWeight: 600,
-                              }}
-                            >
-                              CEO JOB REVIEW
-                            </span>
-                          )}
-                          {t.description && isCeoJobReviewTask(t) && (
-                            <div style={{ fontSize: '0.72rem', color: 'var(--muted)', marginTop: 4, lineHeight: 1.3 }}>
-                              {(t.description.match(/jobstreet\.com[^\s)]+/gi) || []).length > 0
-                                ? `${(t.description.match(/###/g) || []).length || 'Multiple'} roles · JobStreet links inside`
-                                : 'Open for shortlist & links'}
-                            </div>
-                          )}
-                          {t.created_at && (
-                            <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: 2 }}>
-                              {formatLocalDateTime(t.created_at)}
-                            </div>
-                          )}
+                      <KanbanTaskTooltip key={t.id} task={t}>
+                        <div
+                          draggable
+                          onDragStart={(e) => handleDragStart(e, t)}
+                          onDragEnd={handleDragEnd}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setSelectedTask(t)}
+                          onKeyDown={(e) => e.key === 'Enter' && setSelectedTask(t)}
+                          className="kanban-card-compact"
+                          style={{
+                            background: draggingTask?.id === t.id ? 'var(--border)' : undefined,
+                            cursor: draggingTask?.id === t.id ? 'grabbing' : 'grab',
+                            opacity: draggingTask?.id === t.id ? 0.8 : 1,
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedTaskIds.has(t.id)}
+                            onChange={(e) => toggleTaskSelection(t.id, e)}
+                            onClick={(e) => e.stopPropagation()}
+                            title="Select task"
+                          />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="kanban-card-title">{t.title || '(no title)'}</div>
+                            {isWorkflowCeoApprovalTask(t) && (
+                              <span style={{ fontSize: '0.6rem', color: '#ca8a04', fontWeight: 700 }}>WF CEO</span>
+                            )}
+                            {isCeoJobReviewTask(t) && (
+                              <span style={{ fontSize: '0.6rem', color: 'var(--accent)', fontWeight: 700 }}>CEO</span>
+                            )}
+                          </div>
                         </div>
-                      </div>
+                      </KanbanTaskTooltip>
                     ))}
                   </td>
                 ))}
@@ -791,6 +824,72 @@ export default function Kanban() {
               className="chat-scroll-panel"
               style={{ padding: '1rem', flex: '1 1 0', minHeight: 0, overflowY: 'auto' }}
             >
+            {drawerTab === 'details' && selectedIsWorkflowApproval && (
+              <div
+                style={{
+                  position: 'sticky',
+                  top: 0,
+                  zIndex: 2,
+                  margin: '-1rem -1rem 1rem',
+                  padding: '0.75rem 1rem',
+                  borderBottom: '1px solid #ca8a04',
+                  background: 'rgba(202, 138, 4, 0.12)',
+                }}
+              >
+                {approveError && (
+                  <div style={{ fontSize: '0.85rem', color: '#dc2626', marginBottom: 6 }}>{approveError}</div>
+                )}
+                {approveSuccess && (
+                  <div style={{ fontSize: '0.85rem', color: '#166534', marginBottom: 6 }}>{approveSuccess}</div>
+                )}
+                <label style={{ display: 'block', fontSize: '0.8rem', marginBottom: 6 }}>
+                  Comment (optional)
+                  <textarea
+                    rows={2}
+                    value={wfApprovalComment}
+                    onChange={(e) => setWfApprovalComment(e.target.value)}
+                    style={{ width: '100%', marginTop: 4, padding: '0.4rem', borderRadius: 6, border: '1px solid var(--border)' }}
+                    placeholder="Add a note for the workflow…"
+                  />
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => respondWorkflowApproval('approve')}
+                    disabled={wfApproving}
+                    style={{
+                      flex: 1,
+                      padding: '0.65rem',
+                      borderRadius: 6,
+                      background: '#16a34a',
+                      color: 'white',
+                      border: 'none',
+                      fontWeight: 700,
+                      cursor: wfApproving ? 'wait' : 'pointer',
+                    }}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => respondWorkflowApproval('reject')}
+                    disabled={wfApproving}
+                    style={{
+                      flex: 1,
+                      padding: '0.65rem',
+                      borderRadius: 6,
+                      background: '#dc2626',
+                      color: 'white',
+                      border: 'none',
+                      fontWeight: 700,
+                      cursor: wfApproving ? 'wait' : 'pointer',
+                    }}
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+            )}
             {drawerTab === 'details' && selectedIsCeoReview && (
               <div
                 style={{
@@ -904,6 +1003,48 @@ export default function Kanban() {
             {drawerTab === 'artifacts' && (
               <KanbanTaskArtifacts artifacts={taskDetail?.artifacts || []} groups={taskDetail?.artifact_groups || []} />
             )}
+            {drawerTab === 'details' &&
+              (taskDetail?.delegation_prompt ||
+                taskDetail?.workflow_step_input ||
+                taskDetail?.workflow_step_output) && (
+                <div
+                  style={{
+                    marginBottom: '1rem',
+                    padding: '0.85rem',
+                    background: 'rgba(37, 99, 235, 0.06)',
+                    borderRadius: 8,
+                    border: '1px solid rgba(37, 99, 235, 0.25)',
+                  }}
+                >
+                  <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: 8, fontWeight: 600 }}>
+                    Input received by agent / task
+                  </div>
+                  {taskDetail?.delegation_prompt && (
+                    <div style={{ marginBottom: '0.75rem' }}>
+                      <div style={{ fontSize: '0.72rem', fontWeight: 600, marginBottom: 4, color: 'var(--muted)' }}>
+                        Agent prompt
+                      </div>
+                      <pre
+                        style={{
+                          margin: 0,
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                          fontSize: '0.82rem',
+                          fontFamily: 'inherit',
+                        }}
+                      >
+                        {taskDetail.delegation_prompt}
+                      </pre>
+                    </div>
+                  )}
+                  {taskDetail?.workflow_step_input && (
+                    <WorkflowIoDetailBlock title="Workflow step bindings" io={taskDetail.workflow_step_input} kind="input" />
+                  )}
+                  {!taskDetail?.delegation_prompt && !taskDetail?.workflow_step_input && taskDetail?.workflow_step_output && (
+                    <WorkflowIoDetailBlock title="Workflow step context" io={taskDetail.workflow_step_output} kind="output" />
+                  )}
+                </div>
+              )}
             {drawerTab === 'details' && (taskDetail?.description || selectedTask.description) && (
                 <div
                   style={{

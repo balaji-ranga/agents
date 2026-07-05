@@ -118,6 +118,31 @@ export default function (api: { registerTool: Function; config: Record<string, u
     kanban_move_status: kanbanMoveStatusParams,
     kanban_reassign_to_coo: { type: "object" as const, properties: { task_id: { type: "number", description: "Kanban task ID." } }, additionalProperties: true },
     kanban_assign_task: { type: "object" as const, properties: { task_id: { type: "number" }, to_agent_id: { type: "string" } }, additionalProperties: true },
+    agent_workflow_list: { type: "object" as const, properties: { ceo_user_id: { type: "string", description: "Optional CEO owner user id (defaults to platform CEO)." } }, additionalProperties: true },
+    agent_workflow_trigger: {
+      type: "object" as const,
+      properties: {
+        message: { type: "string", description: "Chat phrase that matches a published workflow, e.g. run brain approval test" },
+        workflow_id: { type: "string", description: "Optional workflow id if phrase is unknown" },
+        input: { type: "string", description: "Optional run input (defaults to message)" },
+        ceo_user_id: { type: "string", description: "Optional CEO owner user id" },
+      },
+      additionalProperties: true,
+    },
+    agent_workflow_get_draft: {
+      type: "object" as const,
+      properties: { workflow_id: { type: "string" } },
+      additionalProperties: true,
+    },
+    agent_workflow_mutate: {
+      type: "object" as const,
+      properties: {
+        workflow_id: { type: "string" },
+        actions: { type: "array", description: "Array of mutation actions" },
+        ceo_user_id: { type: "string" },
+      },
+      additionalProperties: true,
+    },
   };
   for (const t of tools) {
     const name = t?.name;

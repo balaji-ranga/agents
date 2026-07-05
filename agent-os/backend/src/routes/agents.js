@@ -2,10 +2,10 @@ import { Router } from 'express';
 import { join } from 'path';
 import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { getDb } from '../db/schema.js';
-import { attachAuthUser } from '../middleware/auth.js';
-import { resolveCeoDataUserIdFromRequest } from '../middleware/auth.js';
+import { attachAuthUser, resolveAuthenticatedCeoUserId, resolveCeoDataUserIdFromRequest } from '../middleware/auth.js';
 import { listAgentsForUser } from '../services/users.js';
 import * as openclaw from '../gateway/openclaw.js';
+import { tryTriggerWorkflowFromChat } from '../services/agent-workflow-runner.js';
 import * as workspace from '../workspace/adapter.js';
 import { normalizeReplyContent } from '../services/delegation-queue.js';
 import { createFullAgent } from '../services/create-full-agent.js';
@@ -201,7 +201,7 @@ router.delete('/:id', (req, res) => {
 });
 
 // Chat: get recent turns for an agent
-router.get('/:id/chat', (req, res) => {
+router.get('/:id/chat', attachAuthUser, (req, res) => {
   try {
     const turns = db().prepare('SELECT id, role, content, created_at FROM chat_turns WHERE agent_id = ? ORDER BY created_at')
       .all(req.params.id);
@@ -212,7 +212,7 @@ router.get('/:id/chat', (req, res) => {
 });
 
 // Chat: send message and get reply (OpenClaw gateway)
-router.post('/:id/chat', async (req, res) => {
+router.post('/:id/chat', attachAuthUser, async (req, res) => {
   try {
     const agentId = req.params.id;
     const agent = db().prepare('SELECT * FROM agents WHERE id = ?').get(agentId);
@@ -220,6 +220,20 @@ router.post('/:id/chat', async (req, res) => {
 
     const message = typeof req.body?.message === 'string' ? req.body.message : (req.body?.content ?? req.body?.text ?? '');
     if (!message.trim()) return res.status(400).json({ error: 'message is required' });
+
+    let workflowTrigger = null;
+    if (req.authUser && (req.authUser.role === 'ceo' || req.authUser.role === 'admin')) {
+      const ownerUserId = resolveAuthenticatedCeoUserId(req, req.body || {});
+      try {
+        workflowTrigger = await tryTriggerWorkflowFromChat(ownerUserId, message, {
+          id: req.authUser.id,
+          name: req.authUser.name,
+          type: 'chat',
+        });
+      } catch (wfErr) {
+        console.warn('[agent-workflow] chat trigger failed:', wfErr.message);
+      }
+    }
 
     const userId = resolveCeoDataUserIdFromRequest(req, req.body || {});
     const profileId = req.body?.profile_id || req.body?.profileId || null;
@@ -238,6 +252,15 @@ router.post('/:id/chat', async (req, res) => {
       userContent = `${tags.join('\n')}\n${message}`;
     }
     messages.push({ role: 'user', content: userContent });
+
+    if (workflowTrigger && agent.is_coo) {
+      const wfName = workflowTrigger.definition_name || workflowTrigger.definition_id;
+      userContent += `\n\n[System — agent workflow started: "${wfName}" run #${workflowTrigger.run_number} (run_id ${workflowTrigger.id}). Briefly confirm to the CEO and mention they can track it on the Workflows page.]`;
+      messages[messages.length - 1] = { role: 'user', content: userContent };
+    } else if (workflowTrigger && !agent.is_coo) {
+      userContent += `\n\n[System — agent workflow "${workflowTrigger.definition_name || workflowTrigger.definition_id}" run #${workflowTrigger.run_number} was started from this message.]`;
+      messages[messages.length - 1] = { role: 'user', content: userContent };
+    }
 
     if (String(agentId).toLowerCase() === 'jobdiscovery') {
       try {
@@ -270,7 +293,19 @@ router.post('/:id/chat', async (req, res) => {
     db().prepare('INSERT INTO chat_turns (agent_id, role, content) VALUES (?, ?, ?)').run(agentId, 'user', message);
     db().prepare('INSERT INTO chat_turns (agent_id, role, content) VALUES (?, ?, ?)').run(agentId, 'assistant', replyText);
 
-    res.json({ reply: replyText, usage, agent_id: agentId });
+    res.json({
+      reply: replyText,
+      usage,
+      agent_id: agentId,
+      workflow_triggered: workflowTrigger
+        ? {
+            run_id: workflowTrigger.id,
+            run_number: workflowTrigger.run_number,
+            definition_id: workflowTrigger.definition_id,
+            definition_name: workflowTrigger.definition_name,
+          }
+        : null,
+    });
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
