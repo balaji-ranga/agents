@@ -4,12 +4,13 @@
 import { chatCompletions } from '../config/llm.js';
 import { createJobApplicationsService } from './job-applications.js';
 import { enrichJobFromUrl } from './job-job-enrichment.js';
+import { getPublicBaseUrl } from '../config/public-url.js';
 import { buildCandidateContextForScoring, parseBorderlineReview } from './job-candidate-context.js';
 
 async function fetchUrlSummary(url) {
   if (!url) return '';
   try {
-    const base = (process.env.AGENT_OS_PUBLIC_URL || `http://127.0.0.1:${Number(process.env.PORT) || 3001}`).replace(/\/$/, '');
+    const base = getPublicBaseUrl();
     const r = await fetch(`${base}/api/tools/summarize-url`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-internal-test': '1', 'x-openclaw-agent-id': 'fitscorer' },

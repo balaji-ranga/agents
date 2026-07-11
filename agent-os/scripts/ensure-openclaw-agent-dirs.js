@@ -1,14 +1,25 @@
 /**
- * Ensure OpenClaw agent dirs exist for balserve and techresearcher so the gateway
- * can run them (sessions + auth). Run from agent-os: node scripts/ensure-openclaw-agent-dirs.js
+ * Ensure OpenClaw agent dirs exist so the gateway can run them (sessions + auth).
+ * Run from agent-os: node scripts/ensure-openclaw-agent-dirs.js
  */
 import { mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
+import { resolveOpenClawAgentsDir } from './lib/openclaw-paths.js';
 
-const USERPROFILE = process.env.USERPROFILE || process.env.HOME || '';
-const AGENTS_ROOT = join(USERPROFILE, '.openclaw', 'agents');
+const AGENTS_ROOT = resolveOpenClawAgentsDir();
 
-const AGENT_IDS = ['bala', 'balserve', 'techresearcher', 'expensemanager', 'socialasstant'];
+const AGENT_IDS = [
+  'bala',
+  'balserve',
+  'workflowbuilder',
+  'techresearcher',
+  'expensemanager',
+  'socialasstant',
+  'jobdiscovery',
+  'fitscorer',
+  'resumetailor',
+  'applicationagent',
+];
 
 for (const id of AGENT_IDS) {
   const agentDir = join(AGENTS_ROOT, id, 'agent');

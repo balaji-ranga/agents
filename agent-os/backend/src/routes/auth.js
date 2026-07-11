@@ -8,6 +8,7 @@ import {
   updateUserProfile,
 } from '../services/users.js';
 import { resolveCeoDataUserId, getBalaCeoAuthId } from '../services/job-applicant-ceo.js';
+import { getCeoDbModeForUser, usesTenantCeoDb } from '../db/ceo-db-config.js';
 import { attachAuthUser, requireAuth, logout } from '../middleware/auth.js';
 
 const router = Router();
@@ -16,8 +17,8 @@ router.use(attachAuthUser);
 
 router.post('/register', (req, res) => {
   try {
-    const { email, password, name, region, mobile } = req.body || {};
-    const user = registerCeoUser({ email, password, name, region, mobile });
+    const { email, password, name, region, mobile, db_mode, ceo_db_mode } = req.body || {};
+    const user = registerCeoUser({ email, password, name, region, mobile, db_mode, ceo_db_mode });
     const session = createSession(user.id);
     res.status(201).json({ user, session, message: 'CEO account created. Standard workspace agents granted.' });
   } catch (e) {
@@ -63,6 +64,8 @@ router.get('/me', requireAuth, (req, res) => {
       user,
       agents,
       data_ceo_user_id: req.authUser.role === 'ceo' ? resolveCeoDataUserId(req.authUser.id) : null,
+      ceo_db_mode: req.authUser.role === 'ceo' ? getCeoDbModeForUser(req.authUser.id) : null,
+      uses_shared_db: req.authUser.role === 'ceo' ? !usesTenantCeoDb(req.authUser.id) : null,
       uses_platform_db: req.authUser.role === 'ceo' && req.authUser.id === getBalaCeoAuthId(),
     });
   } catch (e) {

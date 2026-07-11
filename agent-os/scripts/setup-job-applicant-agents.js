@@ -13,12 +13,12 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
+import { resolveOpenClawDir } from './lib/openclaw-paths.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = join(__dirname, '..');
 const TEMPLATES = join(ROOT, 'openclaw-workspace-templates');
-const homedir = process.env.USERPROFILE || process.env.HOME || '';
-const OPENCLAW_DIR = join(homedir, '.openclaw');
+const OPENCLAW_DIR = resolveOpenClawDir();
 const CONFIG_PATH = join(OPENCLAW_DIR, 'openclaw.json');
 const OVERRIDES_PATH = join(OPENCLAW_DIR, 'agent-os-tool-overrides.json');
 

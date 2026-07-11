@@ -4,9 +4,9 @@
  */
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
+import { resolveOpenClawDir } from './lib/openclaw-paths.js';
 
-const homedir = process.env.USERPROFILE || process.env.HOME || '';
-const OPENCLAW_DIR = join(homedir, '.openclaw');
+const OPENCLAW_DIR = resolveOpenClawDir();
 
 const BROWSER_SECTION = `
 ---

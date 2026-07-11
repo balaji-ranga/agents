@@ -11,21 +11,34 @@ import { getSummarizeUrlConfig, getToolsApiKey, getOpenAiConfig, getImageConfig,
 import { chatCompletions } from '../config/llm.js';
 import { getDb } from '../db/schema.js';
 import * as meta from '../services/content-tools-meta.js';
+import { assertCallerMayUseTool } from '../services/openclaw-agent-tools.js';
 import { scheduleCeoRequestViaOpenClawCron } from '../services/delegation-queue.js';
 import {
   listChatTriggerableWorkflows,
+  listPublishedWorkflows,
   triggerAgentWorkflowForOwner,
   resolveWorkflowOwnerUserId,
+  enquireWorkflows,
 } from '../services/agent-workflow-chat-tools.js';
 import { applyWorkflowBuilderActions, getWorkflowDraftForAgent } from '../services/agent-workflow-builder.js';
 import { resolveAuthenticatedCeoUserId } from '../middleware/auth.js';
+import { getPublicBaseUrl } from '../config/public-url.js';
+import { getOpenClawMediaDir } from '../config/openclaw-paths.js';
 import jobApplicantTools from './job-applicant-tools.js';
 
 const router = Router();
 const KANBAN_STATUSES = ['open', 'awaiting_confirmation', 'in_progress', 'completed', 'failed'];
 
 function getCallerAgent(req) {
-  const id = (req.headers['x-openclaw-agent-id'] || req.headers['x-agent-id'] || '').toString().trim();
+  const id = (
+    req.headers['x-openclaw-agent-id'] ||
+    req.headers['x-agent-id'] ||
+    req.body?.caller_agent_id ||
+    req.body?.x_openclaw_agent_id ||
+    ''
+  )
+    .toString()
+    .trim();
   if (!id) return null;
   const db = getDb();
   return db.prepare('SELECT id, name, is_coo FROM agents WHERE LOWER(id) = LOWER(?) OR LOWER(openclaw_agent_id) = LOWER(?)').get(id, id) || null;
@@ -41,10 +54,10 @@ function isWorkflowBuilderCaller(caller) {
   const id = String(caller.id || '').toLowerCase();
   return id === 'workflowbuilder';
 }
-const PORT = Number(process.env.PORT) || 3001;
 function getBackendBaseUrl() {
-  const base = process.env.AGENT_OS_PUBLIC_URL || process.env.TOOLS_BASE_URL || `http://127.0.0.1:${PORT}`;
-  return base.replace(/\/$/, '');
+  const override = process.env.TOOLS_BASE_URL || process.env.AGENT_OS_PUBLIC_URL;
+  if (override) return String(override).replace(/\/$/, '');
+  return getPublicBaseUrl();
 }
 
 function logContentTool(toolName, requestPayload, responsePayload, status, source = null) {
@@ -330,12 +343,7 @@ router.post('/summarize-url', async (req, res) => {
   }
 });
 
-const GENERATED_MEDIA_DIR = join(
-  process.env.USERPROFILE || process.env.HOME || '',
-  '.openclaw',
-  'media',
-  'generated'
-);
+const GENERATED_MEDIA_DIR = getOpenClawMediaDir('generated');
 
 function resolveImagePrompt(body) {
   const candidates = [body?.prompt, body?.description, body?.text, body?.image_prompt];
@@ -694,7 +702,49 @@ router.post('/intent-classify-and-delegate', optionalAuth, async (req, res) => {
 });
 
 /**
- * List published agent workflows with chat triggers (COO only).
+ * Enquire about workflows by description or natural-language query (COO only).
+ */
+router.post('/agent-workflow-enquire', optionalAuth, (req, res) => {
+  const source = req.headers['x-openclaw-agent-id'] || req.headers['x-agent-id'] || null;
+  const requestPayload = req.body || {};
+  try {
+    const caller = getCallerAgent(req);
+    if (!caller || !caller.is_coo) {
+      const err = { error: 'Only COO can enquire about agent workflows' };
+      logContentTool('agent_workflow_enquire', requestPayload, err, 'error', source);
+      return res.status(403).json(err);
+    }
+    const query =
+      requestPayload.query ||
+      requestPayload.description ||
+      requestPayload.message ||
+      requestPayload.q ||
+      '';
+    if (!String(query).trim() && !requestPayload.all) {
+      const err = { error: 'query or description required (or pass all: true to list every published workflow)' };
+      logContentTool('agent_workflow_enquire', requestPayload, err, 'error', source);
+      return res.status(400).json(err);
+    }
+    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const out = {
+      ok: true,
+      ceo_user_id: ownerUserId,
+      ...enquireWorkflows(ownerUserId, query, {
+        limit: requestPayload.limit,
+        all: requestPayload.all === true,
+      }),
+    };
+    logContentTool('agent_workflow_enquire', requestPayload, out, 'ok', source);
+    res.json(out);
+  } catch (e) {
+    const err = { error: e.message };
+    logContentTool('agent_workflow_enquire', requestPayload, err, 'error', source);
+    res.status(500).json(err);
+  }
+});
+
+/**
+ * List published agent workflows (COO only). Default: all published; pass chat_only: true for chat-phrase triggers only.
  */
 router.post('/agent-workflow-list', optionalAuth, (req, res) => {
   const source = req.headers['x-openclaw-agent-id'] || req.headers['x-agent-id'] || null;
@@ -707,8 +757,15 @@ router.post('/agent-workflow-list', optionalAuth, (req, res) => {
       return res.status(403).json(err);
     }
     const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
-    const workflows = listChatTriggerableWorkflows(ownerUserId);
-    const out = { ok: true, ceo_user_id: ownerUserId, workflows, count: workflows.length };
+    const chatOnly = requestPayload.chat_only === true || requestPayload.chatOnly === true;
+    const workflows = listPublishedWorkflows(ownerUserId, { chatOnly });
+    const out = {
+      ok: true,
+      ceo_user_id: ownerUserId,
+      chat_only: chatOnly,
+      workflows,
+      count: workflows.length,
+    };
     logContentTool('agent_workflow_list', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
@@ -846,6 +903,11 @@ router.post('/invoke', async (req, res) => {
     if (!row.enabled) {
       logContentTool(toolName, req.body, { error: 'Tool is disabled' }, 'error', source);
       return res.status(403).json({ error: 'Tool is disabled' });
+    }
+    const grantCheck = assertCallerMayUseTool(source, toolName);
+    if (!grantCheck.ok) {
+      logContentTool(toolName, req.body, { error: grantCheck.error }, 'error', source);
+      return res.status(403).json({ error: grantCheck.error });
     }
     const params = { ...req.body };
     delete params.tool_name;

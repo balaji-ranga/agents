@@ -2,8 +2,9 @@
  * Pause / delete workflow runs with Kanban + delegation cleanup.
  */
 import { getDb } from '../db/schema.js';
-import { removeKanbanTasksForAgentWorkflowRun } from './agent-workflow-kanban.js';
 import * as store from './agent-workflow-store.js';
+import { removeKanbanTasksForAgentWorkflowRun } from './agent-workflow-kanban.js';
+import { cancelAllListenersForRun } from './agent-workflow-event-listener.js';
 
 function db() {
   return getDb();
@@ -36,6 +37,7 @@ function cancelDelegationsForRun(runId) {
 }
 
 function cleanupRunArtifacts(runId) {
+  cancelAllListenersForRun(runId);
   cancelDelegationsForRun(runId);
   const kanban = removeKanbanTasksForAgentWorkflowRun(runId);
   return kanban;
@@ -74,6 +76,7 @@ export function deleteRun(runId, ownerUserId, actor) {
   if (!run) return null;
 
   cleanupRunArtifacts(runId);
+  cancelAllListenersForRun(runId);
   db().prepare('DELETE FROM agent_workflow_run_steps WHERE run_id = ?').run(runId);
   db().prepare('DELETE FROM agent_workflow_runs WHERE id = ?').run(runId);
 

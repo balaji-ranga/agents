@@ -10,7 +10,7 @@ export function getBalaCeoAuthId() {
   return (process.env.AGENT_OS_BALA_CEO_ID || 'ceo-bala').trim() || 'ceo-bala';
 }
 
-/** True when this id uses agent-os.db (legacy / Bala), not a tenant ceo.db. */
+/** True when this id always uses agent-os.db (legacy / Bala). Other CEOs follow ceo_db_mode from registration. */
 export function isPlatformLegacyCeo(ceoUserId) {
   const id = String(ceoUserId || '').trim();
   return id === getDefaultCeoUserId() || id === getBalaCeoAuthId();

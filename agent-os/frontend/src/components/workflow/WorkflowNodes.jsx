@@ -90,6 +90,34 @@ export function ApiNode({ id, data }) {
   );
 }
 
+export function ExternalAgentNode({ id, data }) {
+  const cfg = data.taskConfig || {};
+  const name = cfg.externalAgentName || cfg.externalAgentId || 'select agent';
+  return (
+    <NodeShell
+      nodeId={id}
+      color="#059669"
+      icon="🌐"
+      title={data.label || 'External Agent'}
+      subtitle={`A2A · ${String(name).slice(0, 36)}`}
+    />
+  );
+}
+
+export function CustomScriptNode({ id, data }) {
+  const cfg = data.taskConfig || {};
+  const name = cfg.customScriptName || cfg.customScriptId || 'select script';
+  return (
+    <NodeShell
+      nodeId={id}
+      color="#b45309"
+      icon="📜"
+      title={data.label || 'Custom Script'}
+      subtitle={String(name).slice(0, 40)}
+    />
+  );
+}
+
 export function ParallelNode({ id, data }) {
   return (
     <NodeShell nodeId={id} color="#ea580c" icon="⑂" title={data.label || 'Parallel'} subtitle="Run branches concurrently" />
@@ -159,12 +187,58 @@ export function BrainNode({ id, data }) {
   );
 }
 
+export function McpToolNode({ id, data }) {
+  const cfg = data.taskConfig || {};
+  return (
+    <NodeShell
+      nodeId={id}
+      color="#0ea5e9"
+      icon="⚡"
+      title={data.label || 'MCP Tool'}
+      subtitle={`${cfg.toolName || 'tool'} · ${cfg.mcpServerId || 'server'}`}
+    />
+  );
+}
+
+export function SseListenNode({ id, data }) {
+  const cfg = data.taskConfig || {};
+  const sub = cfg.streamUrl || cfg.mcpServerId || 'configure stream';
+  return (
+    <NodeShell
+      nodeId={id}
+      color="#0284c7"
+      icon="📡"
+      title={data.label || 'SSE Listen'}
+      subtitle={String(sub).slice(0, 36)}
+    />
+  );
+}
+
+export function SubWorkflowNode({ id, data }) {
+  const cfg = data.taskConfig || {};
+  return (
+    <NodeShell
+      nodeId={id}
+      color="#4f46e5"
+      icon="↳"
+      title={data.label || 'Sub-workflow'}
+      subtitle={`${cfg.targetWorkflowId || 'workflow id'} · ${cfg.triggerMode || 'manual'}`}
+    />
+  );
+}
+
 export const workflowNodeTypes = {
   trigger: TriggerNode,
   agent: AgentNode,
   tool: ToolNode,
+  mcp_tool: McpToolNode,
+  mcp_listen: SseListenNode,
+  sse_listen: SseListenNode,
+  sub_workflow: SubWorkflowNode,
   email: EmailNode,
   api: ApiNode,
+  externalAgent: ExternalAgentNode,
+  custom_script: CustomScriptNode,
   parallel: ParallelNode,
   merge: MergeNode,
   ceo_approval: CeoApprovalNode,
@@ -176,13 +250,19 @@ export const workflowNodeTypes = {
 export const PALETTE_ITEMS = [
   { type: 'trigger', label: 'Trigger', color: '#16a34a', desc: 'Start point (manual / schedule / chat)' },
   { type: 'agent', label: 'Agent', color: '#2563eb', desc: 'Delegate to workspace agent' },
-  { type: 'brain', label: 'Brain (LLM)', color: '#6366f1', desc: 'Direct LLM call (OpenAI / Anthropic / Ollama)' },
+  { type: 'brain', label: 'Brain (LLM)', color: '#6366f1', desc: 'Direct LLM call; optional MCP tool-calling loop' },
   { type: 'ceo_approval', label: 'CEO Approval', color: '#ca8a04', desc: 'Human approve/reject on Kanban' },
   { type: 'if', label: 'IF', color: '#0d9488', desc: 'Branch on condition (true/false handles)' },
   { type: 'while', label: 'While', color: '#db2777', desc: 'Loop while condition (loop/exit handles)' },
   { type: 'email', label: 'Send Email', color: '#dc2626', desc: 'SMTP email with static + dynamic inputs' },
   { type: 'api', label: 'Call API', color: '#7c3aed', desc: 'HTTP request with configurable URL/body' },
+  { type: 'externalAgent', label: 'External Agent (A2A)', color: '#059669', desc: 'Invoke external agent via A2A protocol' },
+  { type: 'custom_script', label: 'Custom Script', color: '#b45309', desc: 'Run approved LangGraph / Python / JS in sandbox' },
   { type: 'tool', label: 'Content Tool', color: '#9333ea', desc: 'Invoke a content tool' },
+  { type: 'mcp_tool', label: 'MCP', color: '#0ea5e9', desc: 'Call MCP tool, prompt, or resource' },
+  { type: 'mcp_listen', label: 'SSE Listen', color: '#0284c7', desc: 'Long-running SSE stream — dispatches downstream on each event' },
+  { type: 'sse_listen', label: 'SSE Listen', color: '#0284c7', desc: 'Long-running SSE stream — dispatches downstream on each event' },
+  { type: 'sub_workflow', label: 'Sub-workflow', color: '#4f46e5', desc: 'Invoke another published workflow (manual / event / chat)' },
   { type: 'parallel', label: 'Parallel', color: '#ea580c', desc: 'Fan-out to multiple branches' },
   { type: 'merge', label: 'Merge', color: '#0891b2', desc: 'Join parallel branches' },
 ];
@@ -199,8 +279,72 @@ export function defaultNodeData(type, extra = {}) {
   if (type === 'tool') {
     data = { ...data, toolName: '', toolPayload: {} };
   }
-  if (type === 'email' || type === 'api' || type === 'brain' || type === 'ceo_approval') {
-    data = { ...data, inputBindings: [], outputs: [], taskConfig: {} };
+  if (type === 'email' || type === 'brain' || type === 'ceo_approval' || type === 'mcp_tool' || type === 'mcp_listen' || type === 'sse_listen' || type === 'sub_workflow' || type === 'externalAgent' || type === 'custom_script') {
+    data = { ...data, inputBindings: data.inputBindings || [], outputs: data.outputs || [], taskConfig: data.taskConfig || {} };
+  }
+  if (type === 'externalAgent') {
+    data.taskConfig = {
+      externalAgentId: '',
+      externalAgentName: '',
+      skillId: '',
+      waitForCompletion: true,
+      timeoutMs: 120000,
+      ...(data.taskConfig || {}),
+    };
+    data.inputBindings = data.inputBindings?.length
+      ? data.inputBindings
+      : [
+          { id: 'message', label: 'Message', mode: 'dynamic', value: '{{input}}', sourceNodeId: '', sourceOutputKey: 'text' },
+          { id: 'contextId', label: 'Context ID', mode: 'static', value: '', sourceNodeId: '', sourceOutputKey: 'text' },
+        ];
+    data.outputs = data.outputs?.length
+      ? data.outputs
+      : [
+          { id: 'text', label: 'Response text' },
+          { id: 'result', label: 'Full result' },
+          { id: 'task_id', label: 'Task ID' },
+          { id: 'ok', label: 'Success' },
+        ];
+  }
+  if (type === 'custom_script') {
+    data.taskConfig = {
+      customScriptId: '',
+      customScriptName: '',
+      ...(data.taskConfig || {}),
+    };
+    data.inputBindings = data.inputBindings?.length
+      ? data.inputBindings
+      : [{ id: 'payload', label: 'Payload', mode: 'dynamic', value: '{{input}}', sourceNodeId: '', sourceOutputKey: 'text' }];
+    data.outputs = data.outputs?.length
+      ? data.outputs
+      : [
+          { id: 'text', label: 'Script text' },
+          { id: 'result', label: 'Full result' },
+          { id: 'ok', label: 'Success' },
+        ];
+  }
+  if (type === 'api') {
+    data.taskConfig = {
+      method: 'GET',
+      authType: 'none',
+      basicUsername: '',
+      basicPassword: '',
+      bearerToken: '',
+      apiKeyHeader: 'X-API-Key',
+      apiKeyValue: '',
+      httpHeadersJson: '{}',
+      timeoutMs: 60000,
+    };
+    data.inputBindings = [
+      { id: 'url', label: 'URL', mode: 'static', value: '', sourceNodeId: '', sourceOutputKey: 'text' },
+      { id: 'body', label: 'Request body', mode: 'static', value: '', sourceNodeId: '', sourceOutputKey: 'text' },
+      { id: 'headers', label: 'Extra headers (JSON)', mode: 'static', value: '{}', sourceNodeId: '', sourceOutputKey: 'text' },
+    ];
+    data.outputs = [
+      { id: 'status', label: 'HTTP status' },
+      { id: 'body', label: 'Response body' },
+      { id: 'ok', label: 'Success (2xx)' },
+    ];
   }
   if (type === 'if' || type === 'while') {
     data = {
@@ -222,7 +366,50 @@ export function defaultNodeData(type, extra = {}) {
       model: 'llama3.2',
       maxTokens: 512,
       systemPrompt: 'You are a concise assistant.\n\nContext:\n{{input}}',
-      mcpEndpoints: '[]',
+      mcpToolCalling: false,
+      mcpServerIds: [],
+      mcpToolAllowlist: [],
+      mcpServerAuth: {},
+      mcpMaxToolRounds: 8,
+      customScriptMode: 'off',
+      customScriptId: '',
+    };
+  }
+  if (type === 'sse_listen' || type === 'mcp_listen') {
+    data.taskConfig = {
+      streamUrl: '',
+      mcpServerId: '',
+      eventsPath: '/events/stream',
+      httpHeadersJson: '{}',
+    };
+    data.outputs = [
+      { id: 'event', label: 'Latest SSE event' },
+      { id: 'text', label: 'Event text' },
+      { id: 'event_count', label: 'Event count' },
+    ];
+  }
+  if (type === 'sub_workflow') {
+    data.taskConfig = {
+      targetWorkflowId: '',
+      triggerMode: 'manual',
+      inputTemplate: '{{event}}',
+      waitForCompletion: false,
+    };
+    data.outputs = [
+      { id: 'run_id', label: 'Child run ID' },
+      { id: 'status', label: 'Child status' },
+      { id: 'text', label: 'Summary' },
+    ];
+  }
+  if (type === 'mcp_tool') {
+    data.taskConfig = {
+      mcpInvokeKind: 'tool',
+      mcpServerId: '',
+      toolName: '',
+      promptName: '',
+      resourceUri: '',
+      staticArguments: '{}',
+      httpHeadersJson: '{}',
     };
   }
   if (type === 'ceo_approval') {

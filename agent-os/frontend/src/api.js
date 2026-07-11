@@ -68,6 +68,11 @@ export const api = {
   agentWorkspaceFiles: (agentId) => get(`/agents/${encodeURIComponent(agentId)}/workspace/files`),
   agentWorkspaceRead: (agentId, name) => get(`/agents/${encodeURIComponent(agentId)}/workspace/files/${encodeURIComponent(name)}`),
   agentWorkspaceWrite: (agentId, name, text) => put(`/agents/${encodeURIComponent(agentId)}/workspace/files/${encodeURIComponent(name)}`, { text }),
+  agentToolsGet: (agentId) => get(`/agents/${encodeURIComponent(agentId)}/tools`),
+  agentToolsSet: (agentId, tools, opts = {}) =>
+    put(`/agents/${encodeURIComponent(agentId)}/tools`, { tools, ...opts }),
+  agentToolsSyncTemplateMd: (agentId, templateId) =>
+    post(`/agents/${encodeURIComponent(agentId)}/tools/sync-template-md`, templateId ? { template_id: templateId } : {}),
   // Agents
   agentsList: () => get('/agents'),
   agentGet: (id) => get(`/agents/${id}`),
@@ -200,18 +205,31 @@ export const api = {
   adminDisableAgent: (userId, agentId) => post(`/admin/users/${encodeURIComponent(userId)}/agents/${encodeURIComponent(agentId)}/disable`, {}),
   adminAgentsGrouped: () => get('/admin/agents'),
   // Agent workflows (custom, separate from job workflows)
-  agentWorkflowList: () => get('/agent-workflows'),
+  agentWorkflowList: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.q) q.set('q', params.q);
+    const qs = q.toString();
+    return get(`/agent-workflows${qs ? `?${qs}` : ''}`);
+  },
   agentWorkflowTemplates: () => get('/agent-workflows/meta/templates'),
   agentWorkflowTemplateGet: (templateId) => get(`/agent-workflows/meta/templates/${encodeURIComponent(templateId)}`),
   agentWorkflowTaskTypes: () => get('/agent-workflows/meta/task-types'),
   agentWorkflowGet: (id) => get(`/agent-workflows/${encodeURIComponent(id)}`),
+  agentWorkflowHookInfo: (id) => get(`/agent-workflows/${encodeURIComponent(id)}/hook`),
   agentWorkflowCreate: (body) => post('/agent-workflows', body),
   agentWorkflowUpdate: (id, body) => patch(`/agent-workflows/${encodeURIComponent(id)}`, body),
   agentWorkflowPublish: (id) => post(`/agent-workflows/${encodeURIComponent(id)}/publish`, {}),
+  agentWorkflowUnpublish: (id) => post(`/agent-workflows/${encodeURIComponent(id)}/unpublish`, {}),
   agentWorkflowDelete: (id) => del(`/agent-workflows/${encodeURIComponent(id)}`),
   agentWorkflowAudit: (id, limit = 50) => get(`/agent-workflows/${encodeURIComponent(id)}/audit?limit=${limit}`),
-  agentWorkflowRuns: (limit = 50) => get(`/agent-workflows/runs?limit=${limit}`),
+  agentWorkflowRuns: ({ page = 1, limit = 20, q = '' } = {}) => {
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (q) params.set('q', q);
+    return get(`/agent-workflows/runs?${params}`);
+  },
   agentWorkflowRunGet: (runId) => get(`/agent-workflows/runs/${runId}`),
+  agentWorkflowStopListen: (runId, nodeId) =>
+    post(`/agent-workflows/runs/${runId}/listen/${encodeURIComponent(nodeId)}/stop`, {}),
   agentWorkflowRunsForDef: (id, limit = 30) => get(`/agent-workflows/${encodeURIComponent(id)}/runs?limit=${limit}`),
   agentWorkflowRun: (id, body = {}) => post(`/agent-workflows/${encodeURIComponent(id)}/run`, body),
   agentWorkflowApprovalRespond: (body) => post('/agent-workflows/approval/respond', body),
@@ -227,8 +245,56 @@ export const api = {
     return del(`/agent-workflows/runs/all${q}`);
   },
   agentWorkflowAgentChat: (body) => post('/agent-workflows/agent-chat', body),
+  agentWorkflowAgentChatHistory: (workflowId = null, limit = 100) => {
+    const q = new URLSearchParams();
+    if (workflowId) q.set('workflow_id', workflowId);
+    q.set('limit', String(limit));
+    return get(`/agent-workflows/agent-chat/history?${q}`);
+  },
   agentWorkflowDraftGet: (id) => get(`/agent-workflows/draft/${encodeURIComponent(id)}`),
   agentWorkflowMutate: (body) => post('/agent-workflows/mutate', body),
   // Clear OpenClaw sessions for an agent (workspace UI)
   agentSessionsClear: (agentId) => post(`/agents/${encodeURIComponent(agentId)}/sessions/clear`, {}),
+  // MCP integrations
+  mcpServersList: (opts = {}) => {
+    const q = opts.forWorkflow ? '?for_workflow=1' : '';
+    return get(`/integrations/mcp${q}`);
+  },
+  mcpServerGet: (id) => get(`/integrations/mcp/${encodeURIComponent(id)}`),
+  mcpServerCreate: (body) => post('/integrations/mcp', body),
+  mcpServerUpdate: (id, body) => patch(`/integrations/mcp/${encodeURIComponent(id)}`, body),
+  mcpServerDelete: (id) => del(`/integrations/mcp/${encodeURIComponent(id)}`),
+  mcpServerConnect: (id, body = {}) => post(`/integrations/mcp/${encodeURIComponent(id)}/connect`, body),
+  mcpServerCallTool: (id, toolName, args, body = {}) =>
+    post(`/integrations/mcp/${encodeURIComponent(id)}/tools/${encodeURIComponent(toolName)}/call`, {
+      arguments: args,
+      ...body,
+    }),
+  mcpServerLogs: (id, limit = 20) => get(`/integrations/mcp/${encodeURIComponent(id)}/logs?limit=${limit}`),
+
+  externalAgentsList: (opts = {}) => {
+    const q = opts.forWorkflow ? '?for_workflow=1' : '';
+    return get(`/integrations/external-agents${q}`);
+  },
+  externalAgentGet: (id) => get(`/integrations/external-agents/${encodeURIComponent(id)}`),
+  externalAgentCreate: (body) => post('/integrations/external-agents', body),
+  externalAgentUpdate: (id, body) => patch(`/integrations/external-agents/${encodeURIComponent(id)}`, body),
+  externalAgentDelete: (id) => del(`/integrations/external-agents/${encodeURIComponent(id)}`),
+  externalAgentDiscover: (id) => post(`/integrations/external-agents/${encodeURIComponent(id)}/discover`, {}),
+  externalAgentInvoke: (id, body) => post(`/integrations/external-agents/${encodeURIComponent(id)}/invoke`, body),
+
+  customScriptsList: (opts = {}) => {
+    const q = opts.forWorkflow ? '?for_workflow=1' : '';
+    return get(`/integrations/custom-scripts${q}`);
+  },
+  customScriptGet: (id, opts = {}) => {
+    const q = opts.includeSource ? '?include_source=1' : '';
+    return get(`/integrations/custom-scripts/${encodeURIComponent(id)}${q}`);
+  },
+  customScriptScan: (body) => post('/integrations/custom-scripts/scan', body),
+  customScriptCreate: (body) => post('/integrations/custom-scripts', body),
+  customScriptUpdate: (id, body) => patch(`/integrations/custom-scripts/${encodeURIComponent(id)}`, body),
+  customScriptDelete: (id) => del(`/integrations/custom-scripts/${encodeURIComponent(id)}`),
+  customScriptExecute: (id, body = {}) =>
+    post(`/integrations/custom-scripts/${encodeURIComponent(id)}/execute`, body),
 };

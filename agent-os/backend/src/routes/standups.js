@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { getDb } from '../db/schema.js';
 import { runCooSummarization } from '../services/coo.js';
 import * as openclaw from '../gateway/openclaw.js';
-import { scheduleCeoRequestViaOpenClawCron, enqueueGetWorkFromTeam, enqueueDelegationTask, postCallbackForRequestId, appendToAgentMemory, extractTaskSummaryFromPrompt, appendDelegationResponseToAgentChat } from '../services/delegation-queue.js';
+import { scheduleCeoRequestViaOpenClawCron, enqueueGetWorkFromTeam, enqueueDelegationTask, postCallbackForRequestId, appendToAgentMemory, extractTaskSummaryFromPrompt, extractTaskContentFromPrompt, appendDelegationResponseToAgentChat } from '../services/delegation-queue.js';
+import { isAgentWorkflowPrompt } from '../services/agent-workflow-kanban.js';
 import { getLastIntentDebug } from '../services/intent-classifier.js';
 
 const router = Router();
@@ -64,7 +65,13 @@ router.post('/cron-callback', (req, res) => {
     db()
       .prepare('UPDATE agent_delegation_tasks SET status = ?, response_content = ?, completed_at = ? WHERE id = ?')
       .run('completed', responseContent, now, taskId);
-    appendDelegationResponseToAgentChat(agent_id, extractTaskSummaryFromPrompt(task.prompt), responseContent);
+    appendDelegationResponseToAgentChat(
+      agent_id,
+      isAgentWorkflowPrompt(task.prompt)
+        ? extractTaskContentFromPrompt(task.prompt)
+        : extractTaskSummaryFromPrompt(task.prompt),
+      responseContent
+    );
     const summary = extractTaskSummaryFromPrompt(task.prompt);
     appendToAgentMemory(agent_id, summary).catch(() => {});
     postCallbackForRequestId(request_id);

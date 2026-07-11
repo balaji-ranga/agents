@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api.js';
+import { formatLocalDateTime } from '../utils/formatDateTime.js';
 
 const STATUS_COLORS = {
   completed: '#16a34a',
@@ -30,11 +31,7 @@ function StepBadge({ status }) {
 
 function formatDt(iso) {
   if (!iso) return '—';
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
+  return formatLocalDateTime(iso);
 }
 
 export default function JobWorkflows() {

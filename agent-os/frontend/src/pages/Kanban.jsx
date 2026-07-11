@@ -5,7 +5,7 @@ import KanbanTaskDescription, { isCeoJobReviewTask, isWorkflowCeoApprovalTask, p
 import KanbanTaskArtifacts from '../components/KanbanTaskArtifacts.jsx';
 import KanbanBoardCell from '../components/KanbanBoardCell.jsx';
 import { WorkflowIoDetailBlock } from '../components/WorkflowStepTooltip.jsx';
-import { taskCreatedAtDisplay } from '../utils/formatDateTime.js';
+import { taskCreatedAtDisplay, formatChatTimestamp } from '../utils/formatDateTime.js';
 import ActionFeedbackBanner from '../components/ActionFeedbackBanner.jsx';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
 
@@ -1065,7 +1065,14 @@ export default function Kanban() {
               )}
             {drawerTab === 'activity' && (taskDetail?.messages || []).map((m) => (
                 <div key={m.id} style={{ marginBottom: '0.75rem' }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: 2 }}>{m.role}</div>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', flexWrap: 'wrap', marginBottom: 2 }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--muted)', fontWeight: 600 }}>{m.role}</span>
+                    {m.created_at && (
+                      <time dateTime={m.created_at} style={{ fontSize: '0.68rem', color: 'var(--muted)' }}>
+                        {formatChatTimestamp(m.created_at)}
+                      </time>
+                    )}
+                  </div>
                   <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.9rem' }}>{m.content}</div>
                 </div>
               ))}

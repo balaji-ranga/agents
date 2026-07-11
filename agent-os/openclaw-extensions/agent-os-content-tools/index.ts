@@ -1,17 +1,62 @@
 /**
  * OpenClaw plugin: registers content tools from the Agent OS tools list file.
- * File path: OPENCLAW_TOOLS_LIST_PATH or ~/.openclaw/agent-os-tools.json.
- * Each tool calls the backend POST /api/tools/invoke with tool_name and params.
- * Restart the gateway after adding/removing tools so the file is re-read.
+ * Per-agent allowlists: ~/.openclaw/agent-tool-allowlists.json (hot-reloaded, no gateway restart).
  */
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, statSync } from "fs";
 import { join } from "path";
 
 const OPENCLAW_DIR = join(process.env.USERPROFILE || process.env.HOME || "", ".openclaw");
 const DEFAULT_TOOLS_LIST_PATH = join(OPENCLAW_DIR, "agent-os-tools.json");
+const ALLOWLISTS_PATH = join(OPENCLAW_DIR, "agent-tool-allowlists.json");
+const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || join(OPENCLAW_DIR, "openclaw.json");
+
+let allowlistsCache: { mtime: number; data: Record<string, string[]> } = { mtime: 0, data: {} };
+let openclawConfigCache: { mtime: number; byAgent: Record<string, string[]> } = { mtime: 0, byAgent: {} };
 
 function getToolsListPath(): string {
   return process.env.OPENCLAW_TOOLS_LIST_PATH || DEFAULT_TOOLS_LIST_PATH;
+}
+
+function loadAllowlists(): Record<string, string[]> {
+  try {
+    if (!existsSync(ALLOWLISTS_PATH)) return {};
+    const st = statSync(ALLOWLISTS_PATH);
+    if (st.mtimeMs === allowlistsCache.mtime) return allowlistsCache.data;
+    const data = JSON.parse(readFileSync(ALLOWLISTS_PATH, "utf8"));
+    allowlistsCache = { mtime: st.mtimeMs, data: data && typeof data === "object" ? data : {} };
+    return allowlistsCache.data;
+  } catch {
+    return {};
+  }
+}
+
+function loadOpenClawAllowByAgent(): Record<string, string[]> {
+  try {
+    if (!existsSync(OPENCLAW_CONFIG_PATH)) return {};
+    const st = statSync(OPENCLAW_CONFIG_PATH);
+    if (st.mtimeMs === openclawConfigCache.mtime) return openclawConfigCache.byAgent;
+    const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, "utf8"));
+    const byAgent: Record<string, string[]> = {};
+    for (const a of config?.agents?.list || []) {
+      const id = String(a?.id || "").toLowerCase();
+      if (!id) continue;
+      byAgent[id] = Array.isArray(a?.tools?.allow) ? a.tools.allow : [];
+    }
+    openclawConfigCache = { mtime: st.mtimeMs, byAgent };
+    return byAgent;
+  } catch {
+    return {};
+  }
+}
+
+function isToolAllowedForAgent(agentId: string | null | undefined, toolName: string): boolean {
+  if (!agentId) return true;
+  const key = String(agentId).toLowerCase();
+  const allowlists = loadAllowlists();
+  if (Array.isArray(allowlists[key])) return allowlists[key].includes(toolName);
+  const fromConfig = loadOpenClawAllowByAgent()[key];
+  if (Array.isArray(fromConfig)) return fromConfig.includes(toolName);
+  return true;
 }
 
 interface ToolEntry {
@@ -54,8 +99,11 @@ export default function (api: { registerTool: Function; config: Record<string, u
     return (baseUrl?.trim() || "").replace(/\/$/, "");
   }
 
-  /** Resolve caller agent id from api context (sessionKey, context.agentId, etc.) so backend can authorize Kanban tools. */
-  function resolveCallerAgentId(params: Record<string, unknown>): string | null {
+  /** Resolve caller agent id from tool params and per-invocation OpenClaw context. */
+  function resolveCallerAgentId(
+    params: Record<string, unknown>,
+    toolCtx?: { agentId?: string; sessionKey?: string }
+  ): string | null {
     const fromParams =
       (params?.__openclaw_agent_id as string) ||
       (params?.caller_agent_id as string) ||
@@ -63,10 +111,14 @@ export default function (api: { registerTool: Function; config: Record<string, u
       null;
     if (fromParams && String(fromParams).trim()) return String(fromParams).trim();
 
+    if (toolCtx?.agentId && String(toolCtx.agentId).trim()) return String(toolCtx.agentId).trim();
+    const fromSession = agentIdFromSessionKey(toolCtx?.sessionKey);
+    if (fromSession) return fromSession;
+
     const a = api as Record<string, unknown>;
     const sessionKey = (typeof a.getSessionKey === "function" ? a.getSessionKey() : a.sessionKey) as string | undefined;
-    const fromSession = agentIdFromSessionKey(sessionKey);
-    if (fromSession) return fromSession;
+    const fromApiSession = agentIdFromSessionKey(sessionKey);
+    if (fromApiSession) return fromApiSession;
 
     const ctx = a.context as Record<string, unknown> | undefined;
     const fromCtx = ctx?.agentId ?? ctx?.agent_id;
@@ -85,6 +137,7 @@ export default function (api: { registerTool: Function; config: Record<string, u
     }
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+    if (callerAgentId) headers["x-openclaw-agent-id"] = callerAgentId;
     const body: Record<string, unknown> = { tool_name: toolName, ...params };
     if (callerAgentId) body.caller_agent_id = callerAgentId;
     try {
@@ -118,7 +171,25 @@ export default function (api: { registerTool: Function; config: Record<string, u
     kanban_move_status: kanbanMoveStatusParams,
     kanban_reassign_to_coo: { type: "object" as const, properties: { task_id: { type: "number", description: "Kanban task ID." } }, additionalProperties: true },
     kanban_assign_task: { type: "object" as const, properties: { task_id: { type: "number" }, to_agent_id: { type: "string" } }, additionalProperties: true },
-    agent_workflow_list: { type: "object" as const, properties: { ceo_user_id: { type: "string", description: "Optional CEO owner user id (defaults to platform CEO)." } }, additionalProperties: true },
+    agent_workflow_list: {
+      type: "object" as const,
+      properties: {
+        ceo_user_id: { type: "string", description: "Optional CEO owner user id (defaults to platform CEO)." },
+        chat_only: { type: "boolean", description: "If true, only workflows with chat trigger phrases (default false = all published)." },
+      },
+      additionalProperties: true,
+    },
+    agent_workflow_enquire: {
+      type: "object" as const,
+      properties: {
+        query: { type: "string", description: "Natural-language description to match workflows (e.g. MCP test, brain approval)." },
+        description: { type: "string", description: "Alias for query." },
+        all: { type: "boolean", description: "If true, return all published workflows (ignores query filter)." },
+        ceo_user_id: { type: "string", description: "Optional CEO owner user id." },
+        limit: { type: "number", description: "Max matches (default 10)." },
+      },
+      additionalProperties: true,
+    },
     agent_workflow_trigger: {
       type: "object" as const,
       properties: {
@@ -151,20 +222,24 @@ export default function (api: { registerTool: Function; config: Record<string, u
     const apiToolNote = " Invoke this tool by name with JSON parameters (API call); do not use exec or run as a shell command.";
     const parameters = paramSchemas[name] || { type: "object" as const, properties: {} as Record<string, unknown>, additionalProperties: true };
     api.registerTool(
-      {
+      (toolCtx: { agentId?: string; sessionKey?: string }) => {
+        const callerAgentId = resolveCallerAgentId({}, toolCtx);
+        if (!isToolAllowedForAgent(callerAgentId, name)) return null;
+        return {
         name,
         description: description + apiToolNote + " Prefer this tool when applicable before using other built-in tools.",
         parameters,
         async execute(_id: string, params: Record<string, unknown>) {
           const raw = params || {};
-          const callerAgentId = resolveCallerAgentId(raw);
+          const invokeCaller = resolveCallerAgentId(raw, toolCtx);
           const { __openclaw_agent_id, caller_agent_id, agent_id, ...rest } = raw;
-          const result = await callInvoke(name, rest, callerAgentId);
+          const result = await callInvoke(name, rest, invokeCaller);
           const text = result.ok ? JSON.stringify(result.data) : JSON.stringify({ error: result.error });
           return { content: [{ type: "text" as const, text }] };
         },
+      };
       },
-      { optional: true }
+      { optional: true, name }
     );
   }
 }

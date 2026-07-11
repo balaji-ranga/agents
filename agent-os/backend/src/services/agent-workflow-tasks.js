@@ -195,47 +195,54 @@ export async function executeEmailTask(resolvedInputs, nodeConfig = {}) {
 /**
  * HTTP API call task.
  */
-export async function executeApiTask(resolvedInputs, nodeConfig = {}) {
-  const url = resolvedInputs.url?.trim();
+import { renderWorkflowTemplates } from './agent-workflow-io.js';
+import { buildApiRequestHeaders, renderApiNodeConfig } from './agent-workflow-api-auth.js';
+import { assertHttpSuccess, wrapFetchError } from './workflow-http-errors.js';
+
+export async function executeApiTask(resolvedInputs, nodeConfig = {}, context = null) {
+  const render = (v) => (context && v != null ? renderWorkflowTemplates(String(v), context) : v);
+  const cfg = context ? renderApiNodeConfig(nodeConfig, context) : nodeConfig;
+
+  const url = render(resolvedInputs.url)?.trim();
   if (!url) throw new Error('API URL is required');
 
-  const method = (nodeConfig.method || 'POST').toUpperCase();
-  const timeoutMs = Number(nodeConfig.timeoutMs || 60000);
+  const method = (cfg.method || 'POST').toUpperCase();
+  const timeoutMs = Number(cfg.timeoutMs || 60000);
 
-  let headers = { 'Content-Type': 'application/json' };
-  if (resolvedInputs.headers) {
-    try {
-      headers = { ...headers, ...JSON.parse(resolvedInputs.headers) };
-    } catch {
-      throw new Error('headers must be valid JSON');
-    }
-  }
+  let headers = buildApiRequestHeaders(cfg, context, resolvedInputs.headers);
 
-  let body = resolvedInputs.body;
+  let body = render(resolvedInputs.body);
   if (body && method !== 'GET' && method !== 'HEAD') {
     try {
       JSON.parse(body);
     } catch {
-      /* send as plain text */
       headers['Content-Type'] = 'text/plain';
     }
   }
 
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: method === 'GET' || method === 'HEAD' ? undefined : body || undefined,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  let response;
+  let text;
+  try {
+    response = await fetch(url, {
+      method,
+      headers,
+      body: method === 'GET' || method === 'HEAD' ? undefined : body || undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await response.text();
+  } catch (err) {
+    wrapFetchError(err, `API ${method} ${url}`);
+  }
 
-  const text = await response.text();
+  assertHttpSuccess(response, text);
+
   let parsed = text;
   try {
     parsed = JSON.parse(text);
   } catch (_) {}
 
   return {
-    ok: response.ok,
+    ok: true,
     status: response.status,
     body: parsed,
     bodyText: text.slice(0, 5000),

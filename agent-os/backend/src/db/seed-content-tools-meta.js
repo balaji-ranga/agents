@@ -81,7 +81,18 @@ const BUILTIN_TOOLS = [
     endpoint: '/api/tools/agent-workflow-list',
     method: 'POST',
     purpose:
-      'API tool (COO only): list published custom agent workflows with chat trigger phrases for the CEO. Invoke by name with optional ceo_user_id. Use before agent_workflow_trigger to see available phrases.',
+      'API tool (COO only): list all published custom agent workflows for the CEO (manual, schedule, webhook, and chat triggers). Optional chat_only: true to limit to chat-phrase workflows. Optional ceo_user_id. Use agent_workflow_enquire to search by description.',
+    model_used: '',
+    enabled: 1,
+    is_builtin: 1,
+  },
+  {
+    name: 'agent_workflow_enquire',
+    display_name: 'Enquire Agent Workflows',
+    endpoint: '/api/tools/agent-workflow-enquire',
+    method: 'POST',
+    purpose:
+      'API tool (COO only): find published workflows matching a natural-language query, or pass all: true to return every published workflow. Returns id, name, description, trigger_modes, chat_trigger_phrase, and trigger_hint. Use before agent_workflow_trigger when the CEO describes a workflow loosely.',
     model_used: '',
     enabled: 1,
     is_builtin: 1,
@@ -128,6 +139,7 @@ const KANBAN_TOOLS = BUILTIN_TOOLS.filter((t) =>
 const WORKFLOW_TOOLS = BUILTIN_TOOLS.filter((t) =>
   [
     'agent_workflow_list',
+    'agent_workflow_enquire',
     'agent_workflow_trigger',
     'agent_workflow_get_draft',
     'agent_workflow_mutate',

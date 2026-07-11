@@ -2,6 +2,26 @@
  * Resolve workflow step inputs (static vs dynamic from previous step outputs).
  */
 
+function getNestedValue(raw, path) {
+  if (raw == null || !path) return '';
+  const parts = String(path).split('.');
+  let cur = raw;
+  for (const p of parts) {
+    if (cur == null) return '';
+    if (typeof cur === 'string') {
+      try {
+        cur = JSON.parse(cur);
+      } catch {
+        return '';
+      }
+    }
+    cur = cur[p];
+  }
+  if (cur == null) return '';
+  if (typeof cur === 'object') return JSON.stringify(cur);
+  return String(cur);
+}
+
 function getOutputValue(context, nodeId, outputKey = 'text') {
   const raw = context.node_outputs?.[nodeId];
   if (raw == null) return '';
@@ -9,18 +29,41 @@ function getOutputValue(context, nodeId, outputKey = 'text') {
     if (outputKey === 'text' || outputKey === 'result' || outputKey === 'body') return raw;
     try {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && outputKey in parsed) return String(parsed[outputKey] ?? '');
+      if (parsed && typeof parsed === 'object') return getNestedValue(parsed, outputKey);
       return raw;
     } catch {
       return raw;
     }
   }
   if (typeof raw === 'object') {
-    if (outputKey in raw) return raw[outputKey] != null ? String(raw[outputKey]) : '';
+    if (outputKey.includes('.')) return getNestedValue(raw, outputKey);
+    if (outputKey in raw) {
+      const v = raw[outputKey];
+      if (v != null && typeof v === 'object') return JSON.stringify(v);
+      return v != null ? String(v) : '';
+    }
     if (raw.text != null) return String(raw.text);
     return JSON.stringify(raw);
   }
   return String(raw);
+}
+
+/** Replace {{nodeId.outputKey}} bind variables (supports nested keys e.g. body.accessToken). */
+export function renderWorkflowTemplates(text, context) {
+  if (text == null || text === '') return text;
+  let out = String(text).replace(/\{\{([\w-]+)\.([\w.-]+)\}\}/g, (_, nodeId, path) =>
+    getOutputValue(context, nodeId, path)
+  );
+  out = out.replace(/\{\{(\w+)\}\}/g, (match, key) => {
+    if (key === 'input') {
+      return context.initial_input != null ? String(context.initial_input) : match;
+    }
+    const val = context[key];
+    if (val == null) return match;
+    if (typeof val === 'object') return JSON.stringify(val);
+    return String(val);
+  });
+  return out;
 }
 
 /**
@@ -59,7 +102,14 @@ export function resolveNodeInputs(node, graph, context) {
     }
 
     resolved[key] = value;
-    summary.push({ id: key, label: binding.label || key, mode: binding.mode, source, valuePreview: value.slice(0, 120) });
+    summary.push({
+      id: key,
+      label: binding.label || key,
+      mode: binding.mode,
+      source,
+      value,
+      valuePreview: value.length > 200 ? `${value.slice(0, 200)}…` : value,
+    });
   }
 
   if (context.initial_input && !resolved.prompt && node.type === 'agent') {

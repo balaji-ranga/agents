@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
-import ChatMessageContent from './ChatMessageContent';
+import ChatMessageRow from './ChatMessageRow';
 import { useAuth } from '../context/AuthContext';
 
 /**
@@ -89,19 +89,7 @@ export default function AgentChatPanel({
           </div>
         )}
         {turns.map((t, i) => (
-          <div
-            key={i}
-            style={{
-              marginBottom: '0.75rem',
-              padding: '0.5rem 0.75rem',
-              background: t.role === 'user' ? 'var(--border)' : 'transparent',
-              borderRadius: 6,
-              borderLeft: t.role === 'assistant' ? '3px solid var(--accent)' : 'none',
-            }}
-          >
-            <span style={{ fontSize: '0.7rem', color: 'var(--muted)', marginRight: '0.5rem' }}>{t.role}</span>
-            <ChatMessageContent content={t.content} />
-          </div>
+          <ChatMessageRow key={i} role={t.role} content={t.content} createdAt={t.created_at} />
         ))}
         {sending && <div style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>…</div>}
       </div>

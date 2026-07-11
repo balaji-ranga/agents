@@ -33,3 +33,7 @@ Thumbs.db
 
 # Optional: OpenClaw local paths (if you symlink or copy)
 # .openclaw/
+
+# Deploy secrets and generated TLS
+deploy/.env
+deploy/nginx/certs/*.pem

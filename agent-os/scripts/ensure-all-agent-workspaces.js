@@ -8,11 +8,12 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
+import { resolveOpenClawDir } from './lib/openclaw-paths.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = join(__dirname, '..');
 const TEMPLATES = join(ROOT, 'openclaw-workspace-templates');
-const homedir = process.env.USERPROFILE || process.env.HOME || '';
+const OPENCLAW_DIR = resolveOpenClawDir();
 
 const AGENTS = [
   { id: 'bala', workspaceDir: 'workspace' },
@@ -20,11 +21,12 @@ const AGENTS = [
   { id: 'techresearcher', workspaceDir: 'workspace-techresearcher' },
   { id: 'expensemanager', workspaceDir: 'workspace-expenses' },
   { id: 'socialasstant', workspaceDir: 'workspace-socialasstant' },
+  { id: 'workflowbuilder', workspaceDir: 'workspace-workflowbuilder' },
 ];
 
 for (const { id, workspaceDir } of AGENTS) {
   const templateDir = join(TEMPLATES, id);
-  const workspacePath = join(homedir, '.openclaw', workspaceDir);
+  const workspacePath = join(OPENCLAW_DIR, workspaceDir);
 
   if (!existsSync(workspacePath)) {
     mkdirSync(workspacePath, { recursive: true });
@@ -60,7 +62,7 @@ for (const { id, workspaceDir } of AGENTS) {
 
 // COO also needs AGENTS.md from balserve template (ensure-coo-workspace does this)
 const balserveAgents = join(TEMPLATES, 'balserve', 'AGENTS.md');
-const balserveWorkspace = join(homedir, '.openclaw', 'workspace-balserve');
+const balserveWorkspace = join(OPENCLAW_DIR, 'workspace-balserve');
 if (existsSync(balserveAgents) && existsSync(balserveWorkspace)) {
   const agentsMd = readFileSync(balserveAgents, 'utf8');
   writeFileSync(join(balserveWorkspace, 'AGENTS.md'), agentsMd, 'utf8');

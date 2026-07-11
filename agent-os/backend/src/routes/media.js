@@ -6,10 +6,10 @@ import { Router } from 'express';
 import { join, normalize } from 'path';
 import { existsSync, createReadStream } from 'fs';
 import { stat } from 'fs/promises';
+import { getOpenClawMediaDir } from '../config/openclaw-paths.js';
 
 const router = Router();
-const homedir = process.env.USERPROFILE || process.env.HOME || '';
-const MEDIA_ROOT = join(homedir, '.openclaw', 'media');
+const MEDIA_ROOT = getOpenClawMediaDir();
 
 const MIME = {
   '.png': 'image/png',

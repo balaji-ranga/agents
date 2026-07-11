@@ -2,6 +2,7 @@ import { TASK_TYPES } from './workflowTaskMeta.js';
 import {
   formatNodeStepLabel,
   getSourceOutputKeyOptions,
+  getNodeTypeMeta,
   listPriorNodes,
 } from './workflowEditorUtils.js';
 
@@ -37,8 +38,16 @@ export function InputOutputPanel({ node, taskCatalog, allNodes, edges, onChange 
 
   if (!node) return null;
 
+  const typeMeta = getNodeTypeMeta(node.type, taskCatalog);
+
   return (
     <div className="wf-io-panel">
+      <div className="wf-io-type-tag">
+        <span className="wf-node-type-badge wf-node-type-badge-sm" style={{ borderColor: typeMeta.color, color: typeMeta.color }}>
+          {typeMeta.label}
+        </span>
+        <code>{typeMeta.type}</code>
+      </div>
       <h4>Inputs</h4>
       {inputBindings.length === 0 && <p className="wf-io-empty">No inputs for this task type.</p>}
       {inputBindings.map((b, idx) => (
@@ -130,43 +139,82 @@ export function InputOutputPanel({ node, taskCatalog, allNodes, edges, onChange 
         </div>
       ))}
 
-      {(catalog.configFields || []).length > 0 && (
-        <>
-          <h4 style={{ marginTop: '1rem' }}>Task configuration</h4>
-          {catalog.configFields.map((f) => (
-            <label key={f.id} className="wf-field">
-              {f.label}
-              {f.type === 'boolean' ? (
-                <input
-                  type="checkbox"
-                  checked={!!taskConfig[f.id]}
-                  onChange={(e) => setConfig({ [f.id]: e.target.checked })}
-                />
-              ) : f.type === 'select' ? (
-                <select value={taskConfig[f.id] || f.default || ''} onChange={(e) => setConfig({ [f.id]: e.target.value })}>
-                  {(f.options || []).map((o) => (
-                    <option key={o} value={o}>
-                      {o}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  type={f.type === 'number' ? 'number' : f.type === 'password' ? 'password' : 'text'}
-                  value={taskConfig[f.id] ?? ''}
-                  onChange={(e) =>
-                    setConfig({ [f.id]: f.type === 'number' ? Number(e.target.value) : e.target.value })
-                  }
-                  placeholder={f.placeholder || ''}
-                />
-              )}
-              {f.id === 'useEnvSmtp' && (
-                <small>Uses WORKFLOW_SMTP_* from backend .env when enabled</small>
-              )}
-            </label>
-          ))}
-        </>
-      )}
+      {(() => {
+        const configFields = (catalog.configFields || [])            .filter((f) => {
+              if (node.type === 'mcp_tool') {
+                return !['mcpServerId', 'toolName', 'authBearer', 'authHeadersJson', 'httpHeadersJson', 'staticArguments'].includes(f.id);
+              }
+              if (node.type === 'mcp_listen' || node.type === 'sse_listen') {
+                return !['streamUrl', 'mcpServerId', 'eventsPath', 'httpHeadersJson', 'fanOutSpawn', 'spawnWorkflowOdd', 'spawnWorkflowEven', 'timeoutMs'].includes(f.id);
+              }
+              if (node.type === 'sub_workflow') {
+                return !['targetWorkflowId', 'triggerMode', 'inputTemplate', 'waitForCompletion'].includes(f.id);
+              }
+              if (node.type === 'api') {
+                return !['method', 'authType', 'httpHeadersJson', 'basicUsername', 'basicPassword', 'bearerToken', 'apiKeyHeader', 'apiKeyValue'].includes(f.id);
+              }
+              if (node.type === 'brain') {
+                return ![
+                  'modelSource',
+                  'apiEndpoint',
+                  'apiKey',
+                  'model',
+                  'maxTokens',
+                  'systemPrompt',
+                  'mcpToolCalling',
+                  'mcpServerIds',
+                  'mcpToolAllowlist',
+                  'mcpMaxToolRounds',
+                  'mcpServerAuth',
+                  'httpHeadersJson',
+                  'customScriptMode',
+                  'customScriptId',
+                ].includes(f.id);
+              }
+              if (node.type === 'custom_script') {
+                return !['customScriptId', 'customScriptName'].includes(f.id);
+              }
+              return true;
+            });
+        if (!configFields.length) return null;
+        return (
+          <>
+            <h4 style={{ marginTop: '1rem' }}>Task configuration</h4>
+            {configFields.map((f) => (
+              <label key={f.id} className="wf-field">
+                {f.label}
+                {f.type === 'boolean' ? (
+                  <input
+                    type="checkbox"
+                    checked={!!taskConfig[f.id]}
+                    onChange={(e) => setConfig({ [f.id]: e.target.checked })}
+                  />
+                ) : f.type === 'select' ? (
+                  <select value={taskConfig[f.id] || f.default || ''} onChange={(e) => setConfig({ [f.id]: e.target.value })}>
+                    {(f.options || []).map((o) => (
+                      <option key={o} value={o}>
+                        {o}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type={f.type === 'number' ? 'number' : f.type === 'password' ? 'password' : 'text'}
+                    value={taskConfig[f.id] ?? ''}
+                    onChange={(e) =>
+                      setConfig({ [f.id]: f.type === 'number' ? Number(e.target.value) : e.target.value })
+                    }
+                    placeholder={f.placeholder || ''}
+                  />
+                )}
+                {f.id === 'useEnvSmtp' && (
+                  <small>Uses WORKFLOW_SMTP_* from backend .env when enabled</small>
+                )}
+              </label>
+            ))}
+          </>
+        );
+      })()}
 
       <h4 style={{ marginTop: '1rem' }}>Outputs</h4>
       <ul className="wf-output-list">

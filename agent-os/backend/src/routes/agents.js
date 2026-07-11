@@ -10,6 +10,7 @@ import * as workspace from '../workspace/adapter.js';
 import { normalizeReplyContent } from '../services/delegation-queue.js';
 import { createFullAgent } from '../services/create-full-agent.js';
 import { ensureManagedBrowserReady } from '../services/job-browser-auth.js';
+import * as agentTools from '../services/openclaw-agent-tools.js';
 
 const router = Router();
 const homedir = process.env.USERPROFILE || process.env.HOME || '';
@@ -76,6 +77,50 @@ router.get('/:id', (req, res) => {
     res.json(row);
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Per-agent content tool grants (UI → DB → hot allowlists file, no gateway restart)
+router.get('/:id/tools', (req, res) => {
+  try {
+    const agent = db().prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    res.json({
+      grants: agentTools.getAgentToolGrants(agent.id),
+      openclaw_agent_id: agentTools.resolveOpenClawAgentId(agent),
+      tools: agentTools.listToolsCatalogForAgent(agent.id),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put('/:id/tools', async (req, res) => {
+  try {
+    const agent = db().prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    const names = Array.isArray(req.body?.tools) ? req.body.tools : req.body?.grants || [];
+    const result = agentTools.setAgentToolGrants(agent, names);
+    if (req.body?.sync_tools_md) {
+      await agentTools.writeAgentToolsMd(agent, result.grants);
+    }
+    res.json({
+      ...result,
+      tools: agentTools.listToolsCatalogForAgent(agent.id),
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/:id/tools/sync-template-md', async (req, res) => {
+  try {
+    const agent = db().prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    const text = await agentTools.syncToolsMdFromTemplate(agent, req.body?.template_id);
+    res.json({ ok: true, bytes: text.length });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
   }
 });
 

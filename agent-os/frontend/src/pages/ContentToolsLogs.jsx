@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Fragment } from 'react';
 import { api } from '../api';
+import { formatLocalDateTime } from '../utils/formatDateTime.js';
 
 function parsePayload(str) {
   if (!str) return null;
@@ -597,7 +598,7 @@ export default function ContentToolsLogs() {
                       onClick={() => setExpandedId(expandedId === row.id ? null : row.id)}
                     >
                       <td style={{ padding: '0.6rem 1rem', color: 'var(--muted)', fontSize: '0.85rem' }}>
-                        {row.created_at ? new Date(row.created_at).toLocaleString() : '—'}
+                        {row.created_at ? formatLocalDateTime(row.created_at) : '—'}
                       </td>
                       <td style={{ padding: '0.6rem 1rem' }}>{row.tool_name || '—'}</td>
                       <td style={{ padding: '0.6rem 1rem', color: 'var(--muted)' }}>{row.source || '—'}</td>

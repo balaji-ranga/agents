@@ -1,0 +1,214 @@
+# Agent OS production stack — Docker Compose / Podman Compose
+#
+# Quick start (from agent-os/deploy):
+#   cp .env.example .env   # edit secrets + AGENT_OS_PUBLIC_URL
+#   ./scripts/generate-dev-certs.sh   # or place real certs in nginx/certs/
+#   docker compose --profile init run --rm init
+#   docker compose up -d
+#
+# LLM keys: set in deploy/.env — injected at runtime into openclaw + backend containers.
+# Never committed; never written to openclaw.json (except gateway token + Ollama placeholder).
+
+name: agent-os
+
+# Shared LLM/provider env — OpenClaw gateway reads these from process environment.
+x-llm-env: &llm-env
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  OPENAI_PRIMARY_API_KEY: ${OPENAI_PRIMARY_API_KEY:-}
+  OPENAI_PRIMARY_BASE_URL: ${OPENAI_PRIMARY_BASE_URL:-}
+  OPENAI_PRIMARY_MODEL: ${OPENAI_PRIMARY_MODEL:-}
+  OPENAI_SECONDARY_API_KEY: ${OPENAI_SECONDARY_API_KEY:-}
+  OPENAI_SECONDARY_BASE_URL: ${OPENAI_SECONDARY_BASE_URL:-}
+  OPENAI_SECONDARY_MODEL: ${OPENAI_SECONDARY_MODEL:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+  ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+  OPENCLAW_MODEL_PRIMARY: ${OPENCLAW_MODEL_PRIMARY:-openai/gpt-4o-mini}
+  OPENCLAW_OLLAMA_FALLBACK_MODEL: ${OPENCLAW_OLLAMA_FALLBACK_MODEL:-llama3.2}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+  OLLAMA_API_KEY: ${OLLAMA_API_KEY:-ollama-local}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+  OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+
+x-openclaw-env: &openclaw-env
+  <<: *llm-env
+  HOME: /root
+  OPENCLAW_DIR: /root/.openclaw
+  OPENCLAW_CONFIG_PATH: /root/.openclaw/openclaw.json
+  PLAYWRIGHT_BROWSERS_PATH: /opt/playwright
+  OPENCLAW_GATEWAY_PORT: "18789"
+  OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+  AGENT_OS_INTERNAL_API_URL: http://backend:3001
+
+x-backend-env: &backend-env
+  <<: *llm-env
+  PORT: "3001"
+  NODE_ENV: production
+  HOME: /root
+  OPENCLAW_DIR: /root/.openclaw
+  OPENCLAW_CONFIG_PATH: /root/.openclaw/openclaw.json
+  AGENT_OS_DATA_DIR: /data/agent-os
+  AGENT_OS_BASE_URL: ${AGENT_OS_PUBLIC_URL}
+  AGENT_OS_PUBLIC_URL: ${AGENT_OS_PUBLIC_URL}
+  OPENCLAW_GATEWAY_URL: http://openclaw:18789
+  OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+  OPENAI_COO_MODEL: ${OPENAI_COO_MODEL:-}
+  OPENAI_INTENT_MODEL: ${OPENAI_INTENT_MODEL:-}
+  OPENROUTER_HTTP_REFERER: ${OPENROUTER_HTTP_REFERER:-}
+  OPENROUTER_SITE_TITLE: ${OPENROUTER_SITE_TITLE:-Agent OS}
+  REPLICATE_API_TOKEN: ${REPLICATE_API_TOKEN:-}
+  REPLICATE_PRIMARY_BASE_URL: ${REPLICATE_PRIMARY_BASE_URL:-https://api.replicate.com/v1}
+  REPLICATE_SECONDARY_BASE_URL: ${REPLICATE_SECONDARY_BASE_URL:-}
+  REPLICATE_SECONDARY_API_TOKEN: ${REPLICATE_SECONDARY_API_TOKEN:-}
+  TOOLS_VIDEO_MODEL_VERSION: ${TOOLS_VIDEO_MODEL_VERSION:-}
+  AGENT_OS_ADMIN_EMAIL: ${AGENT_OS_ADMIN_EMAIL:-admin@agent-os.local}
+  AGENT_OS_ADMIN_PASSWORD: ${AGENT_OS_ADMIN_PASSWORD:-}
+  OPENCLAW_DISCOVERY_TIMEOUT_MS: ${OPENCLAW_DISCOVERY_TIMEOUT_MS:-900000}
+  OPENCLAW_FETCH_TIMEOUT_MS: ${OPENCLAW_FETCH_TIMEOUT_MS:-240000}
+  JOB_PIPELINE_CRON_SCHEDULE: ${JOB_PIPELINE_CRON_SCHEDULE:-}
+  CUSTOM_SCRIPT_MAX_BYTES: ${CUSTOM_SCRIPT_MAX_BYTES:-131072}
+  CUSTOM_SCRIPT_TIMEOUT_MS: ${CUSTOM_SCRIPT_TIMEOUT_MS:-60000}
+  CUSTOM_SCRIPT_PYTHON: ${CUSTOM_SCRIPT_PYTHON:-python3}
+  CUSTOM_SCRIPT_NODE: ${CUSTOM_SCRIPT_NODE:-node}
+  CUSTOM_SCRIPT_LLM_REVIEW: ${CUSTOM_SCRIPT_LLM_REVIEW:-1}
+  CUSTOM_SCRIPT_LLM_REVIEW_REQUIRED: ${CUSTOM_SCRIPT_LLM_REVIEW_REQUIRED:-1}
+  CUSTOM_SCRIPT_LLM_REVIEW_MAX_TOKENS: ${CUSTOM_SCRIPT_LLM_REVIEW_MAX_TOKENS:-768}
+
+services:
+  openclaw:
+    build:
+      context: ..
+      dockerfile: deploy/docker/openclaw.Dockerfile
+    image: agent-os-openclaw:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      <<: *openclaw-env
+      ENABLE_VNC: ${ENABLE_VNC:-0}
+    volumes:
+      - openclaw_home:/root/.openclaw:Z
+    expose:
+      - "18789"
+    shm_size: "2gb"
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_ADMIN
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18789/ >/dev/null 2>&1 || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/docker/backend.Dockerfile
+    image: agent-os-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    volumes:
+      - agent_os_data:/data/agent-os:Z
+      - openclaw_home:/root/.openclaw:Z
+    expose:
+      - "3001"
+    depends_on:
+      openclaw:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/docker/frontend.Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+    image: agent-os-frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro,Z
+      - ./nginx/certs:/etc/nginx/certs:ro,Z
+    depends_on:
+      frontend:
+        condition: service_started
+      backend:
+        condition: service_healthy
+
+  init:
+    profiles: ["init"]
+    build:
+      context: ..
+      dockerfile: deploy/docker/openclaw.Dockerfile
+    image: agent-os-openclaw:${IMAGE_TAG:-latest}
+    environment:
+      <<: *openclaw-env
+      AGENT_OS_DATA_DIR: /data/agent-os
+      OPENCLAW_SESSION_VISIBILITY: ${OPENCLAW_SESSION_VISIBILITY:-agent}
+    volumes:
+      - agent_os_data:/data/agent-os:Z
+      - openclaw_home:/root/.openclaw:Z
+    entrypoint: ["/entrypoint.sh", "bootstrap"]
+    restart: "no"
+
+  mcp-random-sse:
+    profiles: ["optional-mcp"]
+    build:
+      context: ..
+      dockerfile: deploy/docker/mcp-random-sse.Dockerfile
+    image: agent-os-mcp-random-sse:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      MCP_RANDOM_PORT: "3099"
+      MCP_AUTO_EMIT_MS: ${MCP_AUTO_EMIT_MS:-5000}
+      WORKFLOW_HOOK_URL: ${WORKFLOW_HOOK_URL:-}
+      WORKFLOW_HOOK_SECRET: ${WORKFLOW_HOOK_SECRET:-}
+    expose:
+      - "3099"
+
+  ollama:
+    profiles: ["optional-ollama"]
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama:Z
+    expose:
+      - "11434"
+
+  novnc:
+    profiles: ["optional-browser-login"]
+    image: ghcr.io/linuxserver/webtop:ubuntu-xfce
+    restart: unless-stopped
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${NOVNC_PORT:-6080}:3000"
+    volumes:
+      - openclaw_home:/root/.openclaw:Z
+    shm_size: "2gb"
+
+volumes:
+  agent_os_data:
+  openclaw_home:
+  ollama_data:

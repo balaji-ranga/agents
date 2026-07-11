@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../context/AuthContext';
-import ChatMessageContent from '../components/ChatMessageContent';
+import ChatMessageRow from '../components/ChatMessageRow';
 
 export default function AgentChat() {
   const { agentId } = useParams();
@@ -85,19 +85,7 @@ export default function AgentChat() {
       >
         {turns.length === 0 && !sending && <div style={{ color: 'var(--muted)' }}>No messages yet. Send a message below.</div>}
         {turns.map((t, i) => (
-          <div
-            key={i}
-            style={{
-              marginBottom: '1rem',
-              padding: '0.75rem 1rem',
-              background: t.role === 'user' ? 'var(--border)' : 'transparent',
-              borderRadius: 8,
-              borderLeft: t.role === 'assistant' ? '3px solid var(--accent)' : 'none',
-            }}
-          >
-            <span style={{ fontSize: '0.75rem', color: 'var(--muted)', marginRight: '0.5rem' }}>{t.role}</span>
-            <ChatMessageContent content={t.content} />
-          </div>
+          <ChatMessageRow key={i} role={t.role} content={t.content} createdAt={t.created_at} />
         ))}
         {sending && <div style={{ color: 'var(--muted)' }}>…</div>}
       </div>

@@ -11,6 +11,7 @@ import WorkflowAgentChat from '../components/workflow/WorkflowAgentChat.jsx';
 const STATUS_COLORS = {
   completed: '#16a34a',
   running: '#2563eb',
+  listening: '#0284c7',
   failed: '#dc2626',
   paused: '#d97706',
   draft: '#a3a3a3',
@@ -44,6 +45,12 @@ export default function AgentWorkflows() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [workflows, setWorkflows] = useState([]);
   const [runs, setRuns] = useState([]);
+  const [runsMeta, setRunsMeta] = useState({ total: 0, page: 1, pages: 0, limit: 20 });
+  const [defSearch, setDefSearch] = useState('');
+  const [runSearch, setRunSearch] = useState('');
+  const [runSearchDebounced, setRunSearchDebounced] = useState('');
+  const [runPage, setRunPage] = useState(1);
+  const RUN_PAGE_SIZE = 20;
   const [selectedRun, setSelectedRun] = useState(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(null);
@@ -52,21 +59,61 @@ export default function AgentWorkflows() {
   const [templates, setTemplates] = useState([]);
   const [selectedTemplate, setSelectedTemplate] = useState('');
 
-  const load = useCallback(() => {
-    setLoading(true);
-    Promise.all([api.agentWorkflowList(), api.agentWorkflowRuns(), api.agentWorkflowTemplates()])
-      .then(([wfRes, runsRes, tplRes]) => {
-        setWorkflows(wfRes.workflows || []);
+  const loadTemplates = useCallback(() => {
+    return api.agentWorkflowTemplates().then((tplRes) => setTemplates(tplRes.templates || []));
+  }, []);
+
+  const loadDefinitions = useCallback(() => {
+    return api
+      .agentWorkflowList({ q: defSearch.trim() || undefined })
+      .then((wfRes) => setWorkflows(wfRes.workflows || []))
+      .catch((e) => showError(e.message || 'Failed to load workflows'));
+  }, [defSearch, showError]);
+
+  const loadRuns = useCallback(() => {
+    return api
+      .agentWorkflowRuns({ page: runPage, limit: RUN_PAGE_SIZE, q: runSearchDebounced.trim() || undefined })
+      .then((runsRes) => {
         setRuns(runsRes.runs || []);
-        setTemplates(tplRes.templates || []);
+        setRunsMeta({
+          total: runsRes.total ?? 0,
+          page: runsRes.page ?? runPage,
+          pages: runsRes.pages ?? 0,
+          limit: runsRes.limit ?? RUN_PAGE_SIZE,
+        });
       })
-      .catch((e) => showError(e.message || 'Failed to load workflows'))
-      .finally(() => setLoading(false));
-  }, [showError]);
+      .catch((e) => showError(e.message || 'Failed to load runs'));
+  }, [runPage, runSearchDebounced, showError]);
+
+  const refreshAll = useCallback(() => {
+    setLoading(true);
+    Promise.all([loadDefinitions(), loadRuns(), loadTemplates()]).finally(() => setLoading(false));
+  }, [loadDefinitions, loadRuns, loadTemplates]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    loadTemplates();
+  }, [loadTemplates]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setLoading(true);
+      loadDefinitions().finally(() => setLoading(false));
+    }, defSearch ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [defSearch, loadDefinitions]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setRunSearchDebounced(runSearch);
+      setRunPage(1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [runSearch]);
+
+  useEffect(() => {
+    setLoading(true);
+    loadRuns().finally(() => setLoading(false));
+  }, [runPage, runSearchDebounced, loadRuns]);
 
   const loadRun = useCallback((runId) => {
     if (!runId) return;
@@ -83,17 +130,19 @@ export default function AgentWorkflows() {
   }, [searchParams, loadRun]);
 
   useEffect(() => {
-    if (!selectedRun || selectedRun.status !== 'running') return;
-    const t = setInterval(() => loadRun(selectedRun.id), 5000);
+    if (!selectedRun || !['running', 'listening'].includes(selectedRun.status)) return;
+    const hasListening = (selectedRun.steps || []).some((s) => s.status === 'listening');
+    const interval = hasListening || selectedRun.status === 'running' ? 2000 : 5000;
+    const t = setInterval(() => loadRun(selectedRun.id), interval);
     return () => clearInterval(t);
-  }, [selectedRun?.id, selectedRun?.status, loadRun]);
+  }, [selectedRun?.id, selectedRun?.status, selectedRun?.steps, loadRun]);
 
   const withBusy = async (key, fn, successMessage) => {
     setBusy(key);
     try {
       const result = await fn();
       if (successMessage) showSuccess(successMessage);
-      load();
+      refreshAll();
       return result;
     } catch (e) {
       showError(e.message || 'Action failed');
@@ -137,8 +186,14 @@ export default function AgentWorkflows() {
     try {
       const run = await api.agentWorkflowRun(wf.id, { input: '' });
       setSearchParams({ run_id: String(run.id) });
-      showSuccess(`Run #${run.run_number} started for "${wf.name}"`);
-      load();
+      if (run.status === 'completed') {
+        showSuccess(`Run #${run.run_number} completed for "${wf.name}"`);
+      } else if (run.status === 'failed') {
+        showError(`Run #${run.run_number} failed: ${run.error_message || 'unknown error'}`);
+      } else {
+        showSuccess(`Run #${run.run_number} started for "${wf.name}"`);
+      }
+      refreshAll();
     } catch (e) {
       showError(e.message || 'Failed to start run');
     }
@@ -207,6 +262,21 @@ export default function AgentWorkflows() {
     );
   };
 
+  const stopListenStep = (run, nodeId, e) => {
+    e?.stopPropagation();
+    if (!confirmAction(`Stop SSE listen on step "${nodeId}" for run #${run.run_number}?`)) return;
+    withBusy(
+      `stop-listen-${run.id}-${nodeId}`,
+      async () => {
+        await api.agentWorkflowStopListen(run.id, nodeId);
+        loadRun(run.id);
+      },
+      'Listen stopped'
+    );
+  };
+
+  const listeningSteps = (selectedRun?.steps || []).filter((s) => s.status === 'listening');
+
   const pauseAllRuns = () => {
     if (!confirmAction('Pause all active workflow runs? Kanban tasks for those runs will be cleared.')) return;
     withBusy('pause-all', () => api.agentWorkflowRunsPauseAll(), 'All active runs paused');
@@ -225,7 +295,7 @@ export default function AgentWorkflows() {
   };
 
   return (
-    <div className="page workflows-page" style={{ padding: '1.5rem', maxWidth: 1200 }}>
+    <div className="page workflows-page" style={{ padding: '1.5rem', maxWidth: '100%' }}>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem' }}>
         <div>
           <h1 style={{ margin: 0 }}>Workflows</h1>
@@ -268,7 +338,19 @@ export default function AgentWorkflows() {
       {loading && <p style={{ color: 'var(--muted)' }}>Loading…</p>}
 
       <section style={{ marginBottom: '2rem' }}>
-        <h2>Definitions</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: '0.75rem' }}>
+          <h2 style={{ margin: 0 }}>Definitions</h2>
+          <div className="wf-search-row" style={{ marginBottom: 0 }}>
+            <input
+              type="search"
+              className="wf-search-input"
+              placeholder="Search by name or id…"
+              value={defSearch}
+              onChange={(e) => setDefSearch(e.target.value)}
+              aria-label="Search workflow definitions"
+            />
+          </div>
+        </div>
         <div className="wf-card-grid">
           {workflows.map((wf) => (
             <div key={wf.id} className="wf-card">
@@ -280,6 +362,9 @@ export default function AgentWorkflows() {
                 </div>
               </div>
               <p style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>{wf.description || 'No description'}</p>
+              <code style={{ fontSize: '0.72rem', color: 'var(--muted)', display: 'block', marginBottom: 4 }}>
+                id: {wf.id}
+              </code>
               <div style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>
                 Triggers: {(wf.trigger_modes || ['manual']).join(', ')}
                 {wf.schedule_cron ? ` · ${wf.schedule_cron}` : ''}
@@ -335,15 +420,17 @@ export default function AgentWorkflows() {
             </div>
           ))}
           {!workflows.length && !loading && (
-            <p style={{ color: 'var(--muted)' }}>No workflows yet. Create one to get started.</p>
+            <p className="wf-card-grid-empty" style={{ color: 'var(--muted)' }}>
+              {defSearch.trim() ? 'No definitions match your search.' : 'No workflows yet. Create one to get started.'}
+            </p>
           )}
         </div>
       </section>
 
       <section>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', flexWrap: 'wrap', gap: 8 }}>
-          <h2 style={{ margin: 0 }}>Recent runs</h2>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <h2 style={{ margin: 0 }}>Run instances</h2>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button type="button" className="wf-btn" disabled={!!busy} onClick={pauseAllRuns}>
               Pause all runs
             </button>
@@ -352,8 +439,25 @@ export default function AgentWorkflows() {
             </button>
           </div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: selectedRun ? '1fr 1fr' : '1fr', gap: '1rem' }}>
-          <table className="wf-table">
+        <div className="wf-search-row">
+          <input
+            type="search"
+            className="wf-search-input"
+            placeholder="Search by workflow name, id, run #, or run id…"
+            value={runSearch}
+            onChange={(e) => setRunSearch(e.target.value)}
+            aria-label="Search workflow runs"
+          />
+          {runsMeta.total > 0 && (
+            <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
+              {runsMeta.total} run{runsMeta.total === 1 ? '' : 's'}
+              {runSearchDebounced.trim() ? ' matching' : ''}
+            </span>
+          )}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: selectedRun ? '1fr 1fr' : '1fr', gap: '1rem', alignItems: 'start' }}>
+          <div className="wf-runs-list">
+            <table className="wf-table">
             <thead>
               <tr>
                 <th>Run</th>
@@ -373,7 +477,12 @@ export default function AgentWorkflows() {
                   style={{ cursor: 'pointer', background: selectedRun?.id === r.id ? 'var(--surface)' : undefined }}
                 >
                   <td>#{r.run_number}</td>
-                  <td>{r.definition_name || r.definition_id}</td>
+                  <td>
+                    <div>{r.definition_name || r.definition_id}</div>
+                    {r.definition_name && (
+                      <code style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>{r.definition_id}</code>
+                    )}
+                  </td>
                   <td>
                     <StatusBadge status={r.status} />
                   </td>
@@ -406,8 +515,40 @@ export default function AgentWorkflows() {
                   </td>
                 </tr>
               ))}
+              {!runs.length && !loading && (
+                <tr>
+                  <td colSpan={7} style={{ color: 'var(--muted)', textAlign: 'center', padding: '1rem' }}>
+                    {runSearchDebounced.trim() ? 'No runs match your search.' : 'No run instances yet.'}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
+
+          {runsMeta.pages > 1 && (
+            <div className="wf-pagination">
+              <button
+                type="button"
+                className="wf-btn"
+                disabled={runPage <= 1 || !!busy}
+                onClick={() => setRunPage((p) => Math.max(1, p - 1))}
+              >
+                Previous
+              </button>
+              <span>
+                Page {runsMeta.page} of {runsMeta.pages}
+              </span>
+              <button
+                type="button"
+                className="wf-btn"
+                disabled={runPage >= runsMeta.pages || !!busy}
+                onClick={() => setRunPage((p) => Math.min(runsMeta.pages, p + 1))}
+              >
+                Next
+              </button>
+            </div>
+          )}
+          </div>
 
           {selectedRun && (
             <div className="wf-card">
@@ -432,6 +573,26 @@ export default function AgentWorkflows() {
               </div>
               {selectedRun.error_message && (
                 <p style={{ color: '#dc2626', fontSize: '0.85rem' }}>{selectedRun.error_message}</p>
+              )}
+              {listeningSteps.length > 0 && (
+                <div className="wf-listen-active" style={{ marginTop: 8 }}>
+                  <strong>SSE listen active</strong>
+                  {listeningSteps.map((s) => (
+                    <div key={s.node_id} style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+                      <span style={{ fontSize: '0.85rem' }}>
+                        {s.node_label || s.node_id} <StatusBadge status="listening" />
+                      </span>
+                      <button
+                        type="button"
+                        className="wf-btn wf-btn-danger"
+                        disabled={!!busy}
+                        onClick={(e) => stopListenStep(selectedRun, s.node_id, e)}
+                      >
+                        Stop listen
+                      </button>
+                    </div>
+                  ))}
+                </div>
               )}
               <h4 style={{ marginTop: '1rem' }}>Steps <small style={{ fontWeight: 400, color: 'var(--muted)' }}>— hover for full I/O</small></h4>
               <ul className="wf-steps">
@@ -468,9 +629,11 @@ export default function AgentWorkflows() {
       </section>
 
       <WorkflowAgentChat
-        onWorkflowCreated={(id) => {
-          load();
-          navigate(`/workflows/${id}/edit`);
+        onAgentEffects={(effects) => {
+          if (effects.toast) showSuccess(effects.toast);
+          if (effects.shouldRefreshList) refreshAll();
+          if (effects.runInspected?.runId) loadRun(effects.runInspected.runId);
+          else if (effects.runStarted?.runId) loadRun(effects.runStarted.runId);
         }}
       />
     </div>

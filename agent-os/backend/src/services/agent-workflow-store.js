@@ -1,7 +1,9 @@
 /**
  * Agent workflow definitions: draft/publish, audit trail, run listing.
  */
+import { randomBytes } from 'crypto';
 import { getDb } from '../db/schema.js';
+import { validateWorkflowBrainCredentials } from './agent-workflow-brain-providers.js';
 
 function db() {
   return getDb();
@@ -43,6 +45,7 @@ function rowToDefinition(row) {
     chat_trigger_phrase: row.chat_trigger_phrase || '',
     trigger_modes: (row.trigger_modes || 'manual').split(',').map((s) => s.trim()).filter(Boolean),
     paused: !!row.paused,
+    webhook_secret: row.webhook_secret || '',
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -64,12 +67,23 @@ export function appendAudit(definitionId, { action, summary, changedBy, changedB
     );
 }
 
-export function listDefinitions(ownerUserId) {
+export function listDefinitions(ownerUserId, { search = '' } = {}) {
+  const q = String(search || '').trim().toLowerCase();
+  if (!q) {
+    const rows = db()
+      .prepare(`SELECT * FROM agent_workflow_definitions WHERE owner_user_id = ? ORDER BY updated_at DESC`)
+      .all(ownerUserId);
+    return rows.map(rowToDefinition);
+  }
+  const like = `%${q}%`;
   const rows = db()
     .prepare(
-      `SELECT * FROM agent_workflow_definitions WHERE owner_user_id = ? ORDER BY updated_at DESC`
+      `SELECT * FROM agent_workflow_definitions
+       WHERE owner_user_id = ?
+         AND (LOWER(name) LIKE ? OR LOWER(id) LIKE ?)
+       ORDER BY updated_at DESC`
     )
-    .all(ownerUserId);
+    .all(ownerUserId, like, like);
   return rows.map(rowToDefinition);
 }
 
@@ -151,6 +165,7 @@ export function updateDraft(id, ownerUserId, patch, actor) {
     diff: { fields: Object.keys(patch) },
   });
   if (existing.status === 'published') syncWorkflowScheduleRegistry(id);
+  if (trigger_modes.includes('event')) ensureWebhookSecret(id);
   return getDefinition(id, ownerUserId);
 }
 
@@ -162,6 +177,11 @@ export function publishDefinition(id, ownerUserId, actor) {
   }
   const hasTrigger = def.draft_graph.nodes.some((n) => n.type === 'trigger');
   if (!hasTrigger) throw new Error('Workflow must include a Trigger node');
+
+  const brainErrors = validateWorkflowBrainCredentials(def.draft_graph);
+  if (brainErrors.length) {
+    throw new Error(`Cannot publish: ${brainErrors.join('; ')}`);
+  }
 
   db()
     .prepare(
@@ -179,6 +199,28 @@ export function publishDefinition(id, ownerUserId, actor) {
     diff: { node_count: def.draft_graph.nodes.length, edge_count: def.draft_graph.edges.length },
   });
   syncWorkflowScheduleRegistry(id);
+  return getDefinition(id, ownerUserId);
+}
+
+/** Revert a published workflow to draft (unpublish). Stops schedules; draft graph remains editable. */
+export function unpublishDefinition(id, ownerUserId, actor) {
+  const def = getDefinition(id, ownerUserId);
+  if (!def) return null;
+  if (def.status === 'draft') return def;
+
+  db()
+    .prepare(
+      `UPDATE agent_workflow_definitions SET status = 'draft', updated_at = datetime('now') WHERE id = ? AND owner_user_id = ?`
+    )
+    .run(id, ownerUserId);
+
+  removeWorkflowSchedule(id);
+  appendAudit(id, {
+    action: 'unpublished',
+    summary: `Reverted workflow "${def.name}" to draft (unpublished)`,
+    changedBy: actor?.id,
+    changedByName: actor?.name,
+  });
   return getDefinition(id, ownerUserId);
 }
 
@@ -210,16 +252,57 @@ export function listRuns(definitionId, ownerUserId, limit = 30) {
 }
 
 export function listAllRuns(ownerUserId, limit = 50) {
-  return db()
+  return listAllRunsPaginated(ownerUserId, { page: 1, limit }).runs;
+}
+
+export function listAllRunsPaginated(ownerUserId, { page = 1, limit = 20, search = '' } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const safePage = Math.max(Number(page) || 1, 1);
+  const offset = (safePage - 1) * safeLimit;
+  const q = String(search || '').trim().toLowerCase();
+
+  let where = 'WHERE r.owner_user_id = ?';
+  const params = [ownerUserId];
+  if (q) {
+    const like = `%${q}%`;
+    where += ` AND (
+      LOWER(d.name) LIKE ? OR
+      LOWER(r.definition_id) LIKE ? OR
+      CAST(r.id AS TEXT) LIKE ? OR
+      CAST(r.run_number AS TEXT) LIKE ?
+    )`;
+    params.push(like, like, like, like);
+  }
+
+  const total =
+    db()
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM agent_workflow_runs r
+         JOIN agent_workflow_definitions d ON d.id = r.definition_id
+         ${where}`
+      )
+      .get(...params)?.n ?? 0;
+
+  const rows = db()
     .prepare(
       `SELECT r.*, d.name AS definition_name
        FROM agent_workflow_runs r
        JOIN agent_workflow_definitions d ON d.id = r.definition_id
-       WHERE r.owner_user_id = ?
-       ORDER BY r.started_at DESC LIMIT ?`
+       ${where}
+       ORDER BY r.started_at DESC
+       LIMIT ? OFFSET ?`
     )
-    .all(ownerUserId, limit)
+    .all(...params, safeLimit, offset)
     .map((row) => ({ ...formatRunRow(row), definition_name: row.definition_name }));
+
+  return {
+    runs: rows,
+    total,
+    page: safePage,
+    limit: safeLimit,
+    pages: total > 0 ? Math.ceil(total / safeLimit) : 0,
+  };
 }
 
 function formatRunRow(row) {
@@ -378,7 +461,23 @@ export function updateTriggers(id, ownerUserId, patch, actor) {
     diff: { trigger_modes, schedule_cron, chat_trigger_phrase },
   });
   syncWorkflowScheduleRegistry(id);
+  if (trigger_modes.includes('event')) ensureWebhookSecret(id);
   return getDefinition(id, ownerUserId);
+}
+
+export function generateWebhookSecret() {
+  return randomBytes(24).toString('hex');
+}
+
+export function ensureWebhookSecret(definitionId) {
+  const row = db().prepare('SELECT webhook_secret FROM agent_workflow_definitions WHERE id = ?').get(definitionId);
+  if (!row) return null;
+  if (row.webhook_secret) return row.webhook_secret;
+  const secret = generateWebhookSecret();
+  db()
+    .prepare(`UPDATE agent_workflow_definitions SET webhook_secret = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(secret, definitionId);
+  return secret;
 }
 
 export function isWorkflowTriggerable(def) {

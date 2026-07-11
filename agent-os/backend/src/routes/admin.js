@@ -13,6 +13,7 @@ import {
 } from '../services/users.js';
 import { getDb } from '../db/schema.js';
 import { initCeoDb } from '../db/ceo-db.js';
+import { usesTenantCeoDb } from '../db/ceo-db-config.js';
 
 const router = Router();
 
@@ -29,11 +30,11 @@ router.get('/users', (req, res) => {
 
 router.post('/users', (req, res) => {
   try {
-    const { email, password, name, region, mobile, role = 'ceo' } = req.body || {};
+    const { email, password, name, region, mobile, role = 'ceo', db_mode, ceo_db_mode } = req.body || {};
     if (role === 'admin') {
       return res.status(400).json({ error: 'Use platform seed for admin accounts' });
     }
-    const user = registerCeoUser({ email, password, name, region, mobile });
+    const user = registerCeoUser({ email, password, name, region, mobile, db_mode, ceo_db_mode });
     res.status(201).json({ user });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -63,7 +64,7 @@ router.patch('/users/:userId/enabled', (req, res) => {
 
 router.post('/users/:userId/agents/grant-standard', (req, res) => {
   try {
-    initCeoDb(req.params.userId);
+    if (usesTenantCeoDb(req.params.userId)) initCeoDb(req.params.userId);
     const agents = grantStandardAgents(req.params.userId);
     res.json({ user_id: req.params.userId, granted: agents });
   } catch (e) {

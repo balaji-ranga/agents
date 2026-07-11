@@ -3,9 +3,9 @@
  * of model objects (OpenClaw expects objects, not strings). Run: node scripts/fix-openclaw-ollama-models.js
  */
 import { readFileSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { resolveOpenClawConfigPath } from './lib/openclaw-paths.js';
 
-const configPath = join(process.env.USERPROFILE || process.env.HOME || '', '.openclaw', 'openclaw.json');
+const configPath = resolveOpenClawConfigPath();
 const config = JSON.parse(readFileSync(configPath, 'utf8'));
 const ollama = config.models?.providers?.ollama;
 

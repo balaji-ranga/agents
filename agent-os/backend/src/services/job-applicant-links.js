@@ -1,6 +1,7 @@
 /**
  * Build API links for Kanban / CEO review (relative paths — work through Vite proxy + auth).
  */
+import { getPublicBaseUrl as resolvePublicBaseUrl } from '../config/public-url.js';
 const PLACEHOLDER_RE = /test|example|placeholder|dummy|BalajiJobApps|1Test/i;
 
 export function isConfiguredGoogleSheetId(id) {
@@ -35,7 +36,7 @@ export function buildGDriveFolderLink(folderId) {
 
 /** @deprecated Use relative API paths; kept for external callbacks if needed. */
 export function getPublicBaseUrl() {
-  return (process.env.AGENT_OS_PUBLIC_URL || `http://127.0.0.1:${Number(process.env.PORT) || 3001}`).replace(/\/$/, '');
+  return resolvePublicBaseUrl();
 }
 
 function profileQuery(ceoUserId, profileId) {

@@ -9,7 +9,36 @@ import {
   getTaskCatalog,
   getTaskTypeDef,
 } from './agent-workflow-task-catalog.js';
-import { triggerAgentWorkflowForOwner } from './agent-workflow-chat-tools.js';
+import { triggerAgentWorkflowForOwner, resolveWorkflowForTrigger, resolveRunForOwner, summarizeRunForAgent, waitForRunTerminal } from './agent-workflow-chat-tools.js';
+import {
+  pauseRun,
+  deleteRun,
+  pauseAllRuns,
+  deleteDefinitionWithCleanup,
+} from './agent-workflow-run-manager.js';
+import { stopSseListen } from './agent-workflow-runner.js';
+import { stopScheduleForDefinition, refreshAgentWorkflowSchedules } from './agent-workflow-scheduler.js';
+import { getWorkflowTemplate } from './agent-workflow-templates.js';
+import { buildDetailedGraphSummary } from './agent-workflow-agent-describe.js';
+import {
+  normalizeBrainTaskConfig,
+  buildWorkflowNodeCatalog,
+  getWorkflowNodeTypeSpec,
+  validateWorkflowForPublish,
+} from './agent-workflow-builder-catalog.js';
+import { defaultBrainConfig } from './agent-workflow-agent-runtime-context.js';
+
+function ensureDraftForEdit(def, currentId, ownerUserId, actor) {
+  if (!def || def.status !== 'published') return def;
+  const updated = store.unpublishDefinition(currentId, ownerUserId, actor);
+  stopScheduleForDefinition(currentId);
+  refreshAgentWorkflowSchedules();
+  return updated;
+}
+
+const GRAPH_MUTATION_OPS = new Set([
+  'add_node', 'update_node', 'delete_node', 'add_edge', 'connect', 'delete_edge', 'set_metadata', 'update_metadata',
+]);
 
 const VALID_TYPES = new Set(getTaskCatalog().map((t) => t.type));
 
@@ -58,40 +87,15 @@ export function buildDefaultNode(type, { nodeId, label, position, data = {} } = 
     nodeData.toolName = data.toolName || '';
     nodeData.toolPayload = data.toolPayload || {};
   }
-  if (type === 'brain' && !nodeData.taskConfig?.modelSource) {
-    nodeData.taskConfig = {
-      modelSource: 'ollama',
-      apiEndpoint: process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434/v1',
-      model: process.env.OLLAMA_MODEL || 'llama3.2',
-      maxTokens: 512,
-      systemPrompt: 'You are a concise assistant.\n\nContext:\n{{input}}',
-      mcpEndpoints: '[]',
-      ...nodeData.taskConfig,
-    };
+  if (type === 'brain') {
+    nodeData.taskConfig = normalizeBrainTaskConfig(nodeData.taskConfig, defaultBrainConfig());
   }
 
   return { id, type, position: pos, data: nodeData };
 }
 
 export function summarizeGraphForAgent(graph) {
-  const g = cloneGraph(graph);
-  return {
-    node_count: g.nodes.length,
-    edge_count: g.edges.length,
-    nodes: g.nodes.map((n) => ({
-      id: n.id,
-      type: n.type,
-      label: n.data?.label || n.id,
-      agentId: n.data?.agentId,
-      toolName: n.data?.toolName,
-    })),
-    edges: g.edges.map((e) => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      sourceHandle: e.sourceHandle,
-    })),
-  };
+  return buildDetailedGraphSummary(graph);
 }
 
 /**
@@ -108,7 +112,34 @@ export async function applyWorkflowBuilderActions(ownerUserId, workflowId, actio
 
   for (const action of actions) {
     const op = action.action || action.op || action.type;
-    if (!op) throw new Error('Each action needs action/op/type');
+    if (!op) {
+      results.push({ action: '(missing)', ok: false, error: 'Each action needs action/op/type' });
+      continue;
+    }
+
+    try {
+    if (op === 'get_node_catalog') {
+      results.push({ action: op, ok: true, catalog: buildWorkflowNodeCatalog() });
+      continue;
+    }
+
+    if (op === 'get_node_type') {
+      const nodeType = action.node_type || action.type;
+      const spec = getWorkflowNodeTypeSpec(nodeType);
+      results.push({ action: op, ok: !spec.error, spec, error: spec.error || undefined });
+      continue;
+    }
+
+    if (op === 'validate_publish') {
+      if (!currentId || !def) throw new Error('No workflow in context for validate_publish');
+      const errors = validateWorkflowForPublish(def.draft_graph);
+      results.push({ action: op, ok: errors.length === 0, errors });
+      continue;
+    }
+
+    if (GRAPH_MUTATION_OPS.has(op) && currentId && def?.status === 'published') {
+      def = ensureDraftForEdit(def, currentId, ownerUserId, actor);
+    }
 
     if (op === 'create_workflow') {
       const name = String(action.name || 'New workflow').trim();
@@ -133,7 +164,208 @@ export async function applyWorkflowBuilderActions(ownerUserId, workflowId, actio
       continue;
     }
 
-    if (!currentId || !def) throw new Error('No workflow in context — use create_workflow first or pass workflow_id');
+    if (op === 'create_from_template') {
+      const templateId = String(action.template_id || '').trim();
+      const tpl = getWorkflowTemplate(templateId);
+      if (!tpl?.graph) throw new Error(`Template not found or has no graph: ${templateId}`);
+      const name = String(action.name || tpl.name || 'New workflow').trim();
+      def = store.createDefinition({
+        name,
+        description: action.description || tpl.description || '',
+        ownerUserId,
+        actor,
+        graph: cloneGraph(tpl.graph),
+        trigger_modes: action.trigger_modes || tpl.default_trigger_modes || ['manual'],
+        chat_trigger_phrase: action.chat_phrase || action.chat_trigger_phrase || tpl.default_chat_phrase || '',
+        schedule_cron: action.schedule_cron || tpl.default_schedule_cron || '',
+      });
+      currentId = def.id;
+      results.push({ action: op, ok: true, workflow_id: currentId, name: def.name, template_id: templateId });
+      continue;
+    }
+
+    if (op === 'open_workflow' || op === 'load_workflow' || op === 'reload_workflow') {
+      const target = resolveWorkflowForTrigger(ownerUserId, {
+        workflow_id: action.workflow_id || currentId,
+        workflow_name: action.workflow_name || action.name,
+      });
+      if (!target) throw new Error('Workflow not found for open/reload');
+      currentId = target.id;
+      def = store.getDefinition(currentId, ownerUserId);
+      results.push({ action: op, ok: true, workflow_id: currentId, name: def.name, status: def.status });
+      continue;
+    }
+
+    if (
+      op === 'unpublish' ||
+      op === 'revert_to_draft' ||
+      op === 'unpublish_workflow' ||
+      (op === 'set_status' && String(action.status || '').toLowerCase() === 'draft')
+    ) {
+      const target = resolveWorkflowForTrigger(ownerUserId, {
+        workflow_id: action.workflow_id || currentId,
+        workflow_name: action.workflow_name || action.name,
+      });
+      if (!target) throw new Error('Workflow not found');
+      def = store.unpublishDefinition(target.id, ownerUserId, actor);
+      stopScheduleForDefinition(target.id);
+      refreshAgentWorkflowSchedules();
+      currentId = target.id;
+      results.push({ action: op, ok: true, workflow_id: target.id, status: def.status, name: def.name });
+      continue;
+    }
+
+    if (op === 'pause_workflow') {
+      const target = resolveWorkflowForTrigger(ownerUserId, {
+        workflow_id: action.workflow_id || currentId,
+        workflow_name: action.workflow_name || action.name,
+      });
+      if (!target) throw new Error('Workflow not found');
+      def = store.setPaused(target.id, ownerUserId, true, actor);
+      stopScheduleForDefinition(target.id);
+      pauseAllRuns(ownerUserId, { definitionId: target.id, actor });
+      refreshAgentWorkflowSchedules();
+      currentId = target.id;
+      results.push({ action: op, ok: true, workflow_id: target.id, paused: true });
+      continue;
+    }
+
+    if (op === 'resume_workflow') {
+      const target = resolveWorkflowForTrigger(ownerUserId, {
+        workflow_id: action.workflow_id || currentId,
+        workflow_name: action.workflow_name || action.name,
+      });
+      if (!target) throw new Error('Workflow not found');
+      def = store.setPaused(target.id, ownerUserId, false, actor);
+      refreshAgentWorkflowSchedules();
+      currentId = target.id;
+      results.push({ action: op, ok: true, workflow_id: target.id, paused: false });
+      continue;
+    }
+
+    if (op === 'trigger_workflow' || op === 'trigger_run') {
+      const run = await triggerAgentWorkflowForOwner(ownerUserId, {
+        message: action.message || action.input || action.chat_phrase || '',
+        workflow_id: action.workflow_id || currentId,
+        workflow_name: action.workflow_name || action.name || action.workflowName,
+        actor,
+      });
+      results.push({
+        action: op,
+        ok: true,
+        run_id: run.id,
+        run_number: run.run_number,
+        definition_id: run.definition_id,
+      });
+      continue;
+    }
+
+    if (op === 'pause_run') {
+      const run = resolveRunForOwner(ownerUserId, {
+        run_id: action.run_id,
+        run_number: action.run_number,
+        workflow_id: action.workflow_id || action.definition_id || currentId,
+      });
+      if (!run) throw new Error('Run not found');
+      const updated = pauseRun(run.id, ownerUserId, actor);
+      results.push({ action: op, ok: true, run_id: run.id, run_number: run.run_number, status: updated?.status });
+      continue;
+    }
+
+    if (op === 'stop_run' || op === 'cancel_run' || op === 'delete_run') {
+      const run = resolveRunForOwner(ownerUserId, {
+        run_id: action.run_id,
+        run_number: action.run_number,
+        workflow_id: action.workflow_id || action.definition_id || currentId,
+      });
+      if (!run) throw new Error('Run not found');
+      deleteRun(run.id, ownerUserId, actor);
+      results.push({ action: op, ok: true, run_id: run.id, run_number: run.run_number, deleted: true });
+      continue;
+    }
+
+    if (op === 'pause_all_runs') {
+      const definitionId = action.workflow_id || action.definition_id || currentId || null;
+      const out = pauseAllRuns(ownerUserId, { definitionId, actor });
+      results.push({ action: op, ok: true, paused: out.paused, definition_id: definitionId });
+      continue;
+    }
+
+    if (op === 'inspect_run') {
+      const run = resolveRunForOwner(ownerUserId, {
+        run_id: action.run_id,
+        run_number: action.run_number,
+        workflow_id: action.workflow_id || action.definition_id || currentId,
+      });
+      if (!run) throw new Error('Run not found');
+      results.push({ action: op, ok: true, run: summarizeRunForAgent(run) });
+      continue;
+    }
+
+    if (op === 'test_workflow') {
+      const target = resolveWorkflowForTrigger(ownerUserId, {
+        workflow_id: action.workflow_id || currentId,
+        workflow_name: action.workflow_name || action.name,
+        message: action.message || action.input || '',
+      });
+      if (!target) throw new Error('Workflow not found for test');
+      if (!store.isWorkflowTriggerable(target)) {
+        throw new Error(`Workflow "${target.name}" is not runnable — publish and resume first`);
+      }
+      const run = await triggerAgentWorkflowForOwner(ownerUserId, {
+        workflow_id: target.id,
+        input: action.input || action.message || `Test run: ${target.name}`,
+        actor,
+      });
+      currentId = target.id;
+      def = store.getDefinition(currentId, ownerUserId);
+      const wait = action.wait !== false;
+      let inspected = null;
+      if (wait) {
+        const terminal = await waitForRunTerminal(ownerUserId, run.id, Number(action.timeout_ms) || 45000);
+        inspected = summarizeRunForAgent(terminal);
+      }
+      results.push({
+        action: op,
+        ok: true,
+        run_id: run.id,
+        run_number: run.run_number,
+        definition_id: run.definition_id,
+        run: inspected,
+      });
+      continue;
+    }
+
+    if (op === 'stop_listen') {
+      const run = resolveRunForOwner(ownerUserId, {
+        run_id: action.run_id,
+        run_number: action.run_number,
+        workflow_id: action.workflow_id || currentId,
+      });
+      if (!run) throw new Error('Run not found');
+      const nodeId = action.node_id || action.nodeId;
+      if (!nodeId) throw new Error('stop_listen requires node_id');
+      await stopSseListen(run.id, nodeId, ownerUserId, { actor });
+      results.push({ action: op, ok: true, run_id: run.id, node_id: nodeId });
+      continue;
+    }
+
+    if (op === 'delete_workflow') {
+      const target = resolveWorkflowForTrigger(ownerUserId, {
+        workflow_id: action.workflow_id || currentId,
+        workflow_name: action.workflow_name || action.name,
+      });
+      if (!target) throw new Error('Workflow not found');
+      deleteDefinitionWithCleanup(target.id, ownerUserId, actor);
+      if (currentId === target.id) {
+        currentId = null;
+        def = null;
+      }
+      results.push({ action: op, ok: true, workflow_id: target.id, deleted: true });
+      continue;
+    }
+
+    if (!currentId || !def) throw new Error('No workflow in context — use create_workflow or open_workflow first');
 
     const graph = cloneGraph(def.draft_graph);
 
@@ -152,6 +384,12 @@ export async function applyWorkflowBuilderActions(ownerUserId, workflowId, actio
       }
       if (action.prompt) node.data.prompt = action.prompt;
       if (action.system_prompt) node.data.taskConfig = { ...node.data.taskConfig, systemPrompt: action.system_prompt };
+      if (action.task_config) {
+        node.data.taskConfig = { ...node.data.taskConfig, ...action.task_config };
+        if (type === 'brain') {
+          node.data.taskConfig = normalizeBrainTaskConfig(node.data.taskConfig, defaultBrainConfig());
+        }
+      }
       if (action.connect_from) {
         const edge = {
           id: nextEdgeId(graph),
@@ -180,7 +418,12 @@ export async function applyWorkflowBuilderActions(ownerUserId, workflowId, actio
         node.data.agentName = action.agent_name || action.agent_id;
       }
       if (action.input_bindings) node.data.inputBindings = action.input_bindings;
-      if (action.task_config) node.data.taskConfig = { ...node.data.taskConfig, ...action.task_config };
+      if (action.task_config) {
+        node.data.taskConfig = { ...node.data.taskConfig, ...action.task_config };
+        if (node.type === 'brain') {
+          node.data.taskConfig = normalizeBrainTaskConfig(node.data.taskConfig, defaultBrainConfig());
+        }
+      }
       graph.nodes[idx] = node;
       def = store.updateDraft(currentId, ownerUserId, { graph }, actor);
       results.push({ action: op, ok: true, node_id: nodeId });
@@ -241,36 +484,25 @@ export async function applyWorkflowBuilderActions(ownerUserId, workflowId, actio
 
     if (op === 'publish') {
       def = store.publishDefinition(currentId, ownerUserId, actor);
+      refreshAgentWorkflowSchedules();
       results.push({ action: op, ok: true, status: def.status });
       continue;
     }
 
-    if (op === 'trigger_workflow' || op === 'trigger_run') {
-      const run = await triggerAgentWorkflowForOwner(ownerUserId, {
-        message: action.message || action.input || '',
-        workflow_id: action.workflow_id || currentId,
-        actor,
-      });
-      results.push({
-        action: op,
-        ok: true,
-        run_id: run.id,
-        run_number: run.run_number,
-        definition_id: run.definition_id,
-      });
-      continue;
-    }
-
     throw new Error(`Unknown action: ${op}`);
+    } catch (err) {
+      results.push({ action: op, ok: false, error: err.message });
+    }
   }
 
-  def = store.getDefinition(currentId, ownerUserId);
+  def = currentId ? store.getDefinition(currentId, ownerUserId) : def;
   return {
     workflow_id: currentId,
     workflow: def,
     draft_graph: def?.draft_graph,
     graph_summary: summarizeGraphForAgent(def?.draft_graph),
     results,
+    has_errors: results.some((r) => r.ok === false),
   };
 }
 
@@ -282,6 +514,7 @@ export function getWorkflowDraftForAgent(ownerUserId, workflowId) {
     name: def.name,
     description: def.description,
     status: def.status,
+    paused: !!def.paused,
     trigger_modes: def.trigger_modes,
     chat_trigger_phrase: def.chat_trigger_phrase,
     schedule_cron: def.schedule_cron,

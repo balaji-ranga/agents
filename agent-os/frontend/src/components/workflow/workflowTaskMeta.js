@@ -1,3 +1,32 @@
+export const BRAIN_PROVIDER_PRESETS = {
+  openai: {
+    label: 'OpenAI',
+    apiEndpoint: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
+    apiKeyHint: 'sk-... (required on node)',
+  },
+  anthropic: {
+    label: 'Anthropic',
+    apiEndpoint: 'https://api.anthropic.com/v1',
+    model: 'claude-sonnet-4-20250514',
+    apiKeyHint: 'sk-ant-... (required on node)',
+  },
+  ollama: {
+    label: 'Ollama (local)',
+    apiEndpoint: 'http://127.0.0.1:11434/v1',
+    model: 'llama3.2',
+    apiKeyHint: 'optional for local Ollama',
+  },
+  openrouter: {
+    label: 'OpenRouter',
+    apiEndpoint: 'https://openrouter.ai/api/v1',
+    model: 'openai/gpt-4o-mini',
+    apiKeyHint: 'sk-or-... (required on node)',
+    httpReferer: '',
+    siteTitle: 'Agent OS',
+  },
+};
+
 /** Client-side mirror of standard task I/O (also fetched from API). */
 export const TASK_TYPES = {
   trigger: { label: 'Trigger', color: '#16a34a', icon: '▶' },

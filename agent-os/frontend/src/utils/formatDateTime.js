@@ -33,10 +33,32 @@ export function formatServerDateTime(value, timeZone, opts = {}) {
   return new Intl.DateTimeFormat(undefined, options).format(d);
 }
 
-/** @param {object} [opts] - may include timeZone (server IANA) */
+/** @param {object} [opts] - may include timeZone (server IANA); omit for browser local timezone */
 export function formatLocalDateTime(value, opts = {}) {
   const { timeZone, ...rest } = opts;
   return formatServerDateTime(value, timeZone, rest);
+}
+
+/** Compact timestamp for chat messages (browser local timezone). */
+export function formatChatTimestamp(value) {
+  const d = parseApiDate(value);
+  if (!d) return '';
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZoneName: 'short',
+  }).format(d);
+}
+
+/** Datetime-local input value in browser local timezone (YYYY-MM-DDTHH:mm). */
+export function toLocalDateTimeInputValue(date = new Date()) {
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /** Prefer API pre-formatted created_at_display when present. */

@@ -18,18 +18,32 @@ import { getToolMeta } from './content-tools-meta.js';
 import { processPendingDelegationTasks } from './delegation-queue.js';
 import { resolveNodeInputs, resolveInputText, storeNodeOutput } from './agent-workflow-io.js';
 import { executeEmailTask, executeApiTask } from './agent-workflow-tasks.js';
+import { executeExternalAgentTask } from './agent-workflow-external-agent.js';
 import { executeBrainTask } from './agent-workflow-brain.js';
-import { evaluateCondition } from './agent-workflow-conditions.js';
+import { executeCustomScriptTask } from './custom-scripts.js';
 import { getTaskTypeDef } from './agent-workflow-task-catalog.js';
-
-const PORT = Number(process.env.PORT) || 3001;
+import { evaluateCondition } from './agent-workflow-conditions.js';
+import { validateWorkflowBrainCredentials } from './agent-workflow-brain-providers.js';
+import { getMcpServerForWorkflow, callMcpServerTool, callMcpServerPrompt, callMcpServerResource } from './mcp-servers.js';
+import { parseMcpAuthFromNodeConfig } from './mcp-auth.js';
+import {
+  registerPendingListener,
+  startPersistentListen,
+  clearPendingListener,
+  cancelAllListenersForRun,
+  stopPersistentListen,
+} from './agent-workflow-event-listener.js';
+import { resolveSseStreamUrl } from './sse-stream.js';
+import { getDownstreamNodeIds } from './agent-workflow-graph-utils.js';
+import { getPublicBaseUrl } from '../config/public-url.js';
+import { executeSubWorkflowTask } from './agent-workflow-sub-workflow.js';
 
 function db() {
   return getDb();
 }
 
 function getBackendBaseUrl() {
-  return (process.env.AGENT_OS_BASE_URL || process.env.PUBLIC_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, '');
+  return getPublicBaseUrl();
 }
 
 function parseContext(row) {
@@ -46,12 +60,26 @@ function saveContext(runId, context) {
     .run(JSON.stringify(context), runId);
 }
 
+function getExpectedNodeCount(runId) {
+  const runRow = db().prepare('SELECT definition_id FROM agent_workflow_runs WHERE id = ?').get(runId);
+  if (!runRow) return 1;
+  const def = store.getDefinition(runRow.definition_id);
+  const graph = def?.published_graph || def?.draft_graph || { nodes: [] };
+  return Math.max(1, graph.nodes?.length || 1);
+}
+
 function updateRunProgress(runId) {
-  const total = db().prepare('SELECT COUNT(*) AS n FROM agent_workflow_run_steps WHERE run_id = ?').get(runId).n;
-  const done = db()
-    .prepare(`SELECT COUNT(*) AS n FROM agent_workflow_run_steps WHERE run_id = ? AND status IN ('completed','skipped')`)
-    .get(runId).n;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const expected = getExpectedNodeCount(runId);
+  const row = db()
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN status IN ('completed','skipped','failed') THEN 1
+                  WHEN status IN ('in_progress','listening') THEN 0.5
+                  ELSE 0 END) AS weighted
+       FROM agent_workflow_run_steps WHERE run_id = ?`
+    )
+    .get(runId);
+  const pct = Math.min(100, Math.round(((row?.weighted || 0) / expected) * 100));
   db().prepare(`UPDATE agent_workflow_runs SET progress_pct = ?, updated_at = datetime('now') WHERE id = ?`).run(pct, runId);
   return pct;
 }
@@ -87,14 +115,40 @@ function getOutgoingEdges(graph, nodeId) {
   return graph.edges.filter((e) => e.source === nodeId);
 }
 
+function isWhileLoopBodyNode(graph, nodeId) {
+  return getIncomingEdges(graph, nodeId).some((e) => {
+    const src = getNode(graph, e.source);
+    return src?.type === 'while' && (e.sourceHandle || 'default') === 'loop';
+  });
+}
+
 function allPredecessorsComplete(runId, graph, nodeId) {
   const incoming = getIncomingEdges(graph, nodeId);
   if (!incoming.length) return true;
+
+  const node = getNode(graph, nodeId);
+  let loopBackSources = null;
+  if (node?.type === 'while') {
+    const loopTargets = new Set(
+      getOutgoingEdges(graph, nodeId)
+        .filter((e) => (e.sourceHandle || 'default') === 'loop')
+        .map((e) => e.target)
+    );
+    loopBackSources = new Set(incoming.filter((e) => loopTargets.has(e.source)).map((e) => e.source));
+  }
+
   for (const edge of incoming) {
     const step = db()
       .prepare(`SELECT status FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`)
       .get(runId, edge.source);
-    if (!step || !['completed', 'skipped'].includes(step.status)) return false;
+    if (!step) {
+      if (loopBackSources?.has(edge.source)) continue;
+      return false;
+    }
+    const srcNode = getNode(graph, edge.source);
+    const isListen = srcNode?.type === 'sse_listen' || srcNode?.type === 'mcp_listen';
+    if (isListen && step.status === 'listening') continue;
+    if (!['completed', 'skipped'].includes(step.status)) return false;
   }
   return true;
 }
@@ -102,11 +156,16 @@ function allPredecessorsComplete(runId, graph, nodeId) {
 function buildStepInputRecord(node, graph, context) {
   const { resolved, summary } = resolveNodeInputs(node, graph, context);
   const outputSchema = node.data?.outputs || getTaskTypeDef(node.type)?.outputs || [];
-  return {
+  const record = {
     inputs: summary,
     resolved,
     outputs_schema: outputSchema,
   };
+  if (node.type === 'agent') {
+    record.prompt_template = node.data?.prompt || node.data?.instructions || '';
+    record.resolved_prompt = resolveInputText(node, graph, context);
+  }
+  return record;
 }
 
 function buildStepOutputRecord(outputs) {
@@ -144,6 +203,7 @@ function upsertStep(runId, node, status, extra = {}) {
         node.type,
         existing.id
       );
+    updateRunProgress(runId);
     return existing.id;
   }
   db()
@@ -165,7 +225,9 @@ function upsertStep(runId, node, status, extra = {}) {
       ['completed', 'failed', 'skipped'].includes(status) ? new Date().toISOString() : null,
       extra.error_message ?? null
     );
-  return db().prepare('SELECT id FROM agent_workflow_run_steps ORDER BY id DESC LIMIT 1').get()?.id;
+  const stepId = db().prepare('SELECT id FROM agent_workflow_run_steps ORDER BY id DESC LIMIT 1').get()?.id;
+  updateRunProgress(runId);
+  return stepId;
 }
 
 async function invokeContentTool(toolName, body) {
@@ -244,11 +306,18 @@ export async function startAgentWorkflowRun(definitionId, ownerUserId, { trigger
   if (trigger === 'chat' && !def.trigger_modes.includes('chat')) {
     throw new Error('Chat trigger is disabled for this workflow');
   }
+  if (trigger === 'event' && !def.trigger_modes.includes('event')) {
+    throw new Error('Event trigger is disabled for this workflow');
+  }
   if (def.status !== 'published' || !def.published_graph) {
     throw new Error('Workflow must be published before running');
   }
 
   const graph = def.published_graph;
+  const brainErrors = validateWorkflowBrainCredentials(graph);
+  if (brainErrors.length) {
+    throw new Error(`Cannot run workflow: ${brainErrors.join('; ')}`);
+  }
   const triggerNode = graph.nodes.find((n) => n.type === 'trigger');
   if (!triggerNode) throw new Error('Published workflow has no trigger node');
 
@@ -283,9 +352,17 @@ export async function startAgentWorkflowRun(definitionId, ownerUserId, { trigger
   if (!context.node_outputs) context.node_outputs = {};
   context.node_outputs[triggerNode.id] = { trigger_input: input || `Triggered via ${trigger}`, text: input || `Triggered via ${trigger}` };
   saveContext(runId, context);
+  updateRunProgress(runId);
 
-  await advanceFromNode(runId, triggerNode.id);
-  processPendingDelegationTasks().catch(() => {});
+  void advanceFromNode(runId, triggerNode.id)
+    .catch((err) => {
+      console.error(`[agent-workflow] run ${runId} advance failed:`, err);
+      failRun(runId, err?.message || 'Workflow execution failed');
+      updateRunProgress(runId);
+    })
+    .finally(() => {
+      processPendingDelegationTasks().catch(() => {});
+    });
 
   return store.getRun(runId, ownerUserId);
 }
@@ -309,7 +386,7 @@ export async function advanceFromNode(runId, fromNodeId, branchHandle = null) {
 
   if (!outgoing.length) {
     const anyPending = db()
-      .prepare(`SELECT 1 FROM agent_workflow_run_steps WHERE run_id = ? AND status IN ('pending','in_progress') LIMIT 1`)
+      .prepare(`SELECT 1 FROM agent_workflow_run_steps WHERE run_id = ? AND status IN ('pending','in_progress','listening') LIMIT 1`)
       .get(runId);
     if (!anyPending) completeRun(runId);
     return;
@@ -329,9 +406,20 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
   const existing = db()
     .prepare(`SELECT status FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`)
     .get(runId, nodeId);
-  const allowRerun = node.type === 'while';
+  const dispatch = context._event_dispatch;
+  const eventBranchIds = dispatch ? getDownstreamNodeIds(graph, dispatch.listenNodeId) : new Set();
+  const isEventBranch = dispatch && eventBranchIds.has(nodeId);
+  const isListenType = node.type === 'sse_listen' || node.type === 'mcp_listen';
+  const isLoopBody = isWhileLoopBodyNode(graph, nodeId);
+  const allowRerun = node.type === 'while' || isEventBranch || isLoopBody;
   if (existing && ['completed', 'in_progress', 'failed'].includes(existing.status) && !allowRerun) return;
-  if (existing && existing.status === 'in_progress' && node.type !== 'ceo_approval') return;
+  if (existing && isEventBranch && !isListenType) {
+    db().prepare(`DELETE FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`).run(runId, nodeId);
+  }
+  if (existing && isLoopBody && existing.status === 'completed') {
+    db().prepare(`DELETE FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`).run(runId, nodeId);
+  }
+  if (existing && existing.status === 'in_progress' && node.type !== 'ceo_approval' && !isListenType) return;
 
   if (node.type === 'parallel') {
     upsertStep(runId, node, 'completed', { output: { parallel: true } });
@@ -401,16 +489,12 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
   if (node.type === 'brain') {
     const inputRecord = buildStepInputRecord(node, graph, context);
     const config = node.data?.taskConfig || node.data?.config || {};
-    if (typeof config.mcpEndpoints === 'string') {
-      try {
-        config.mcpEndpoints = JSON.parse(config.mcpEndpoints);
-      } catch {
-        config.mcpEndpoints = [];
-      }
-    }
+    const ownerAuth = db()
+      .prepare('SELECT id, role FROM platform_users WHERE id = ?')
+      .get(runRow.owner_user_id) || { id: runRow.owner_user_id, role: 'ceo' };
     upsertStep(runId, node, 'in_progress', { input: inputRecord });
     try {
-      const outputs = await executeBrainTask(config, inputRecord.resolved, context, graph);
+      const outputs = await executeBrainTask(config, inputRecord.resolved, context, graph, { authUser: ownerAuth });
       storeNodeOutput(context, node.id, outputs);
       saveContext(runId, context);
       upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
@@ -424,7 +508,12 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
         agentId: null,
         ownerUserId: runRow.owner_user_id,
         summary: (outputs.text || '').slice(0, 200),
-        detail: { model: outputs.model_used, provider: outputs.provider },
+        detail: {
+          model: outputs.model_used,
+          provider: outputs.provider,
+          mcp_tools_available: outputs.mcp_tools_available,
+          mcp_tool_calls: outputs.mcp_tool_calls,
+        },
       });
       updateRunProgress(runId);
       await advanceFromNode(runId, nodeId);
@@ -560,6 +649,196 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
     return;
   }
 
+  if (node.type === 'mcp_tool') {
+    const config = node.data?.taskConfig || node.data?.config || {};
+    const mcpServerId = config.mcpServerId || config.mcp_server_id;
+    const invokeKind = (config.mcpInvokeKind || config.mcp_invoke_kind || 'tool').toLowerCase();
+    const toolName = config.toolName || config.tool_name;
+    const promptName = config.promptName || config.prompt_name;
+    const resourceUri = config.resourceUri || config.resource_uri;
+    if (!mcpServerId) {
+      upsertStep(runId, node, 'failed', { error_message: 'MCP server required' });
+      failRun(runId, `Node ${node.id}: MCP server not configured`);
+      return;
+    }
+    if (invokeKind === 'tool' && !toolName) {
+      upsertStep(runId, node, 'failed', { error_message: 'MCP tool name required' });
+      failRun(runId, `Node ${node.id}: MCP tool not configured`);
+      return;
+    }
+    if (invokeKind === 'prompt' && !promptName) {
+      upsertStep(runId, node, 'failed', { error_message: 'MCP prompt name required' });
+      failRun(runId, `Node ${node.id}: MCP prompt not configured`);
+      return;
+    }
+    if (invokeKind === 'resource' && !resourceUri) {
+      upsertStep(runId, node, 'failed', { error_message: 'MCP resource URI required' });
+      failRun(runId, `Node ${node.id}: MCP resource not configured`);
+      return;
+    }
+    const ownerAuth = db()
+      .prepare('SELECT id, role FROM platform_users WHERE id = ?')
+      .get(runRow.owner_user_id) || { id: runRow.owner_user_id, role: 'ceo' };
+    const server = getMcpServerForWorkflow(mcpServerId, ownerAuth);
+    if (!server) {
+      upsertStep(runId, node, 'failed', { error_message: 'MCP server not found or not healthy for this user' });
+      failRun(runId, `MCP server unavailable: ${mcpServerId}`);
+      return;
+    }
+    const inputRecord = buildStepInputRecord(node, graph, context);
+    let staticArgs = {};
+    try {
+      staticArgs = JSON.parse(config.staticArguments || config.static_arguments || '{}');
+    } catch (_) {
+      staticArgs = {};
+    }
+    let dynamicArgs = {};
+    const argRaw = inputRecord.resolved?.arguments || inputRecord.resolved?.payload || inputRecord.resolved?.body;
+    if (argRaw) {
+      try {
+        dynamicArgs = typeof argRaw === 'string' ? JSON.parse(argRaw) : argRaw;
+      } catch {
+        dynamicArgs = { input: argRaw };
+      }
+    }
+    const mergedArgs = { ...staticArgs, ...dynamicArgs };
+
+    upsertStep(runId, node, 'in_progress', { input: inputRecord });
+    try {
+      const nodeAuth = parseMcpAuthFromNodeConfig(config);
+      let out;
+      let stepLabel;
+      if (invokeKind === 'prompt') {
+        out = await callMcpServerPrompt(mcpServerId, promptName, mergedArgs, ownerAuth, nodeAuth);
+        stepLabel = `MCP prompt ${promptName}`;
+      } else if (invokeKind === 'resource') {
+        const uriFromInput = inputRecord.resolved?.uri || inputRecord.resolved?.resource_uri;
+        const uri = String(uriFromInput || resourceUri || '').trim();
+        if (!uri) throw new Error('Resource URI required');
+        out = await callMcpServerResource(mcpServerId, uri, ownerAuth, nodeAuth);
+        stepLabel = `MCP resource ${uri}`;
+      } else {
+        out = await callMcpServerTool(mcpServerId, toolName, mergedArgs, ownerAuth, nodeAuth);
+        stepLabel = `MCP ${toolName}`;
+      }
+      if (out.is_error) {
+        throw new Error(out.text || `${stepLabel} returned an error`);
+      }
+      const outputs = {
+        text: out.text || '',
+        result: out.result,
+        ok: !out.is_error,
+        latency_ms: out.latency_ms,
+        invoke_kind: invokeKind,
+      };
+      storeNodeOutput(context, node.id, outputs);
+      saveContext(runId, context);
+      upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
+      upsertCompletedStepKanban({
+        runId,
+        definitionId: def.id,
+        definitionName: def.name,
+        nodeId: node.id,
+        nodeLabel: node.data?.label || stepLabel,
+        nodeType: 'mcp_tool',
+        agentId: null,
+        ownerUserId: runRow.owner_user_id,
+        summary: `${stepLabel} completed`,
+        detail: { mcp_server_id: mcpServerId, invoke_kind: invokeKind, ok: outputs.ok },
+      });
+      updateRunProgress(runId);
+      await advanceFromNode(runId, nodeId);
+    } catch (err) {
+      upsertStep(runId, node, 'failed', { error_message: err.message });
+      failRun(runId, err.message);
+    }
+    return;
+  }
+
+  if (node.type === 'sse_listen' || node.type === 'mcp_listen') {
+    const config = node.data?.taskConfig || node.data?.config || {};
+    const ownerAuth = db()
+      .prepare('SELECT id, role FROM platform_users WHERE id = ?')
+      .get(runRow.owner_user_id) || { id: runRow.owner_user_id, role: 'ceo' };
+    let server = null;
+    const mcpServerId = config.mcpServerId || config.mcp_server_id;
+    if (mcpServerId) {
+      server = getMcpServerForWorkflow(mcpServerId, ownerAuth);
+      if (!server) {
+        upsertStep(runId, node, 'failed', { error_message: 'MCP server not found or not healthy' });
+        failRun(runId, `MCP server unavailable: ${mcpServerId}`);
+        return;
+      }
+    }
+    let streamUrl;
+    try {
+      streamUrl = resolveSseStreamUrl(config, server);
+    } catch (err) {
+      upsertStep(runId, node, 'failed', { error_message: err.message });
+      failRun(runId, err.message);
+      return;
+    }
+    const nodeAuth = parseMcpAuthFromNodeConfig(config);
+
+    upsertStep(runId, node, 'listening', {
+      input: { stream_url: streamUrl, mcp_server_id: mcpServerId || null },
+    });
+    registerPendingListener({ runId, nodeId: node.id, streamUrl, mcpServerId, eventsPath: config.eventsPath });
+
+    startPersistentListen({
+      runId,
+      nodeId: node.id,
+      streamUrl,
+      authSource: nodeAuth,
+      onEvent: (event) => {
+        handleListenStreamEvent(runId, node.id, event).catch((err) => {
+          console.error('[agent-workflow] SSE event dispatch failed:', err.message);
+        });
+      },
+      onEnd: (meta) => {
+        finalizeListenNode(runId, node.id, meta?.aborted ? 'stopped' : 'disconnected').catch((err) => {
+          console.error('[agent-workflow] SSE listen finalize failed:', err.message);
+        });
+      },
+      onError: (err) => {
+        upsertStep(runId, node, 'failed', { error_message: err.message });
+        failRun(runId, err.message);
+        clearPendingListener(runId, node.id);
+      },
+    });
+    return;
+  }
+
+  if (node.type === 'sub_workflow') {
+    const config = node.data?.taskConfig || node.data?.config || {};
+    const inputRecord = buildStepInputRecord(node, graph, context);
+    upsertStep(runId, node, 'in_progress', { input: inputRecord });
+    try {
+      const outputs = await executeSubWorkflowTask(config, context, runRow.owner_user_id, context.actor);
+      storeNodeOutput(context, node.id, outputs);
+      saveContext(runId, context);
+      upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
+      upsertCompletedStepKanban({
+        runId,
+        definitionId: def.id,
+        definitionName: def.name,
+        nodeId: node.id,
+        nodeLabel: node.data?.label || 'Sub-workflow',
+        nodeType: 'sub_workflow',
+        agentId: null,
+        ownerUserId: runRow.owner_user_id,
+        summary: outputs.text || `Invoked ${outputs.definition_id}`,
+        detail: { outputs },
+      });
+      updateRunProgress(runId);
+      if (!context._event_dispatch) await advanceFromNode(runId, nodeId);
+    } catch (err) {
+      upsertStep(runId, node, 'failed', { error_message: err.message });
+      failRun(runId, err.message);
+    }
+    return;
+  }
+
   if (node.type === 'email') {
     const inputRecord = buildStepInputRecord(node, graph, context);
     const config = node.data?.taskConfig || node.data?.config || {};
@@ -595,7 +874,7 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
     const config = node.data?.taskConfig || node.data?.config || {};
     upsertStep(runId, node, 'in_progress', { input: inputRecord });
     try {
-      const outputs = await executeApiTask(inputRecord.resolved, config);
+      const outputs = await executeApiTask(inputRecord.resolved, config, context);
       storeNodeOutput(context, node.id, outputs);
       saveContext(runId, context);
       upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
@@ -609,6 +888,78 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
         agentId: null,
         ownerUserId: runRow.owner_user_id,
         summary: `API ${outputs.status} ${outputs.ok ? 'ok' : 'failed'}`,
+        detail: { inputs: inputRecord.summary, outputs },
+      });
+      updateRunProgress(runId);
+      await advanceFromNode(runId, nodeId);
+    } catch (err) {
+      upsertStep(runId, node, 'failed', { error_message: err.message });
+      failRun(runId, err.message);
+    }
+    return;
+  }
+
+  if (node.type === 'externalAgent') {
+    const inputRecord = buildStepInputRecord(node, graph, context);
+    const config = node.data?.taskConfig || node.data?.config || {};
+    upsertStep(runId, node, 'in_progress', { input: inputRecord });
+    try {
+      const outputs = await executeExternalAgentTask(
+        inputRecord.resolved,
+        config,
+        context,
+        runRow.owner_user_id
+      );
+      storeNodeOutput(context, node.id, outputs);
+      saveContext(runId, context);
+      upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
+      upsertCompletedStepKanban({
+        runId,
+        definitionId: def.id,
+        definitionName: def.name,
+        nodeId: node.id,
+        nodeLabel: node.data?.label || 'External Agent',
+        nodeType: 'externalAgent',
+        agentId: null,
+        ownerUserId: runRow.owner_user_id,
+        summary: outputs.ok
+          ? `A2A ${outputs.agent_name || config.externalAgentId}: ${(outputs.text || '').slice(0, 80)}`
+          : `A2A failed (${outputs.task_state || 'error'})`,
+        detail: { inputs: inputRecord.summary, outputs },
+      });
+      updateRunProgress(runId);
+      await advanceFromNode(runId, nodeId);
+    } catch (err) {
+      upsertStep(runId, node, 'failed', { error_message: err.message });
+      failRun(runId, err.message);
+    }
+    return;
+  }
+
+  if (node.type === 'custom_script') {
+    const inputRecord = buildStepInputRecord(node, graph, context);
+    const config = node.data?.taskConfig || node.data?.config || {};
+    upsertStep(runId, node, 'in_progress', { input: inputRecord });
+    try {
+      const outputs = await executeCustomScriptTask(
+        inputRecord.resolved,
+        config,
+        { ...context, run_id: runId, definition_id: def.id },
+        runRow.owner_user_id
+      );
+      storeNodeOutput(context, node.id, outputs);
+      saveContext(runId, context);
+      upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
+      upsertCompletedStepKanban({
+        runId,
+        definitionId: def.id,
+        definitionName: def.name,
+        nodeId: node.id,
+        nodeLabel: node.data?.label || 'Custom Script',
+        nodeType: 'custom_script',
+        agentId: null,
+        ownerUserId: runRow.owner_user_id,
+        summary: `Script ${config.customScriptName || config.customScriptId}: ${(outputs.text || '').slice(0, 80)}`,
         detail: { inputs: inputRecord.summary, outputs },
       });
       updateRunProgress(runId);
@@ -738,6 +1089,118 @@ export async function completeCeoApprovalResponse({ kanbanTaskId, decision, comm
 }
 
 /**
+ * Handle each SSE event on a persistent listen node — update outputs and dispatch downstream branch.
+ */
+export async function handleListenStreamEvent(runId, listenNodeId, event) {
+  const runRow = db().prepare('SELECT * FROM agent_workflow_runs WHERE id = ?').get(runId);
+  if (!runRow || runRow.status !== 'running') return null;
+
+  const def = store.getDefinition(runRow.definition_id, runRow.owner_user_id);
+  const graph = def?.published_graph || { nodes: [], edges: [] };
+  const node = getNode(graph, listenNodeId);
+  if (!node || (node.type !== 'sse_listen' && node.type !== 'mcp_listen')) return null;
+
+  const context = parseContext(runRow);
+  context.listen_events = context.listen_events || {};
+  const prev = context.listen_events[listenNodeId] || [];
+  prev.push({ event, at: new Date().toISOString() });
+  context.listen_events[listenNodeId] = prev.slice(-50);
+  context.event = event;
+
+  const outputs = {
+    event,
+    text: JSON.stringify(event),
+    event_count: prev.length,
+    last_event_at: new Date().toISOString(),
+  };
+  if (event && typeof event === 'object' && !Array.isArray(event)) {
+    for (const [k, v] of Object.entries(event)) {
+      if (typeof v !== 'object' || v === null) outputs[k] = v;
+    }
+  }
+  storeNodeOutput(context, listenNodeId, outputs);
+  saveContext(runId, context);
+
+  upsertStep(runId, node, 'listening', { output: buildStepOutputRecord(outputs) });
+
+  const downstream = getOutgoingEdges(graph, listenNodeId);
+  if (downstream.length) {
+    await dispatchListenEventBranch(runId, listenNodeId, event, context, def, runRow);
+  }
+  return { run_id: runId, event_count: prev.length };
+}
+
+async function dispatchListenEventBranch(runId, listenNodeId, event, context, def, runRow) {
+  const graph = def?.published_graph || { nodes: [], edges: [] };
+  context._event_dispatch = { listenNodeId, dispatchId: Date.now(), event };
+  context.event = event;
+  saveContext(runId, context);
+
+  for (const nodeId of getDownstreamNodeIds(graph, listenNodeId)) {
+    db().prepare(`DELETE FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`).run(runId, nodeId);
+  }
+
+  const freshRun = db().prepare('SELECT * FROM agent_workflow_runs WHERE id = ?').get(runId);
+  const freshContext = parseContext(freshRun);
+  freshContext._event_dispatch = context._event_dispatch;
+  freshContext.event = event;
+  freshContext.node_outputs = { ...freshContext.node_outputs, ...context.node_outputs };
+
+  for (const edge of getOutgoingEdges(graph, listenNodeId)) {
+    await executeNode(runId, edge.target, graph, freshContext, def, freshRun);
+  }
+
+  delete freshContext._event_dispatch;
+  saveContext(runId, freshContext);
+}
+
+async function finalizeListenNode(runId, listenNodeId, reason = 'disconnected') {
+  const runRow = db().prepare('SELECT * FROM agent_workflow_runs WHERE id = ?').get(runId);
+  if (!runRow) return null;
+
+  const def = store.getDefinition(runRow.definition_id, runRow.owner_user_id);
+  const graph = def?.published_graph || { nodes: [], edges: [] };
+  const node = getNode(graph, listenNodeId);
+  if (!node) return null;
+
+  clearPendingListener(runId, listenNodeId);
+  const context = parseContext(runRow);
+  const count = context.listen_events?.[listenNodeId]?.length || 0;
+  upsertStep(runId, node, 'completed', {
+    output: buildStepOutputRecord({
+      text: reason === 'stopped' ? 'Listen stopped by user' : 'SSE stream ended',
+      event_count: count,
+      reason,
+    }),
+  });
+  updateRunProgress(runId);
+
+  const anyPending = db()
+    .prepare(`SELECT 1 FROM agent_workflow_run_steps WHERE run_id = ? AND status IN ('pending','in_progress','listening') LIMIT 1`)
+    .get(runId);
+  if (!anyPending) completeRun(runId);
+
+  const downstream = getOutgoingEdges(graph, listenNodeId);
+  if (downstream.length && reason !== 'stopped') {
+    await advanceFromNode(runId, listenNodeId);
+  }
+  return { run_id: runId, reason };
+}
+
+/** Stop a persistent SSE listen for a workflow run instance. */
+export async function stopSseListen(runId, listenNodeId, ownerUserId, { actor = null } = {}) {
+  const run = store.getRun(runId, ownerUserId);
+  if (!run) throw new Error('Run not found');
+  if (run.status !== 'running') throw new Error('Run is not active');
+
+  const step = run.steps?.find((s) => s.node_id === listenNodeId);
+  if (!step || step.status !== 'listening') throw new Error('No active listen step for this node');
+
+  stopPersistentListen(runId, listenNodeId);
+  return finalizeListenNode(runId, listenNodeId, 'stopped');
+}
+
+/**
  * Try to start workflow from chat message (non-blocking).
  */
 export async function tryTriggerWorkflowFromChat(ownerUserId, message, actor) {
@@ -765,6 +1228,32 @@ export async function injectWorkflowStepOutput(runId, nodeId, outputText) {
   await advanceFromNode(runId, nodeId);
   processPendingDelegationTasks().catch(() => {});
   return store.getRun(runId, runRow.owner_user_id);
+}
+
+/** Resume runs left orphaned when the server restarted mid-execution. */
+export function resumeStuckWorkflowRuns() {
+  const rows = db()
+    .prepare(`SELECT id FROM agent_workflow_runs WHERE status = 'running' ORDER BY id ASC`)
+    .all();
+  for (const { id: runId } of rows) {
+    const steps = db()
+      .prepare(`SELECT node_id, status FROM agent_workflow_run_steps WHERE run_id = ? ORDER BY id ASC`)
+      .all(runId);
+    if (!steps.length) continue;
+    const hasActive = steps.some((s) => ['in_progress', 'listening', 'pending'].includes(s.status));
+    if (hasActive) continue;
+    const lastCompleted = [...steps].reverse().find((s) => s.status === 'completed');
+    if (!lastCompleted) continue;
+    console.log(`[agent-workflow] resuming stuck run ${runId} from ${lastCompleted.node_id}`);
+    void advanceFromNode(runId, lastCompleted.node_id)
+      .catch((err) => {
+        console.error(`[agent-workflow] resume run ${runId} failed:`, err);
+        failRun(runId, err?.message || 'Workflow resume failed');
+      })
+      .finally(() => {
+        processPendingDelegationTasks().catch(() => {});
+      });
+  }
 }
 
 export { isAgentWorkflowPrompt };

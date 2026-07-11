@@ -20,6 +20,7 @@ import {
   completeAgentWorkflowKanbanForDelegation,
   isAgentWorkflowPrompt,
 } from './agent-workflow-kanban.js';
+import { getPublicBaseUrl } from '../config/public-url.js';
 import { maybeAdvanceAgentWorkflow, failAgentWorkflowForDelegation } from './agent-workflow-runner.js';
 
 const SESSION_USER = 'agent-os-delegation';
@@ -76,8 +77,7 @@ function truncatePreservingImages(text, maxLen = 2000) {
 }
 
 function getBaseUrl() {
-  const port = Number(process.env.PORT) || 3001;
-  return (process.env.AGENT_OS_BASE_URL || process.env.PUBLIC_URL || `http://127.0.0.1:${port}`).replace(/\/$/, '');
+  return getPublicBaseUrl();
 }
 
 function getAgentsUnderCoo() {
@@ -132,26 +132,31 @@ async function readAgentMemory(agentId) {
 }
 
 /**
+ * Extract task body between --- markers (innermost non-empty block wins for wrapped prompts).
+ */
+export function extractTaskContentFromPrompt(prompt, maxLen = 4000) {
+  if (!prompt || typeof prompt !== 'string') return '';
+  const trimmed = prompt.trim();
+  const markers = [...trimmed.matchAll(/---\s*\n([\s\S]*?)\n\s*---/g)];
+  const parts = markers.map((m) => m[1].trim()).filter(Boolean);
+  if (parts.length) return parts[parts.length - 1].slice(0, maxLen);
+  if (trimmed.includes('New request:')) {
+    const after = trimmed.split('New request:')[1];
+    if (after) return after.trim().slice(0, maxLen);
+  }
+  return trimmed.slice(0, maxLen);
+}
+
+/**
  * Extract the actual task content from a delegation prompt for use as a memory summary.
  * Prompt format: "... ---\n<task content>\n---\n..." or "New request:\n\n<base prompt>".
  * Returns a short string (max 120 chars) describing what was done, not the generic intro.
  */
 export function extractTaskSummaryFromPrompt(prompt) {
-  if (!prompt || typeof prompt !== 'string') return 'Task completed';
-  const trimmed = prompt.trim();
-  const betweenMarkers = trimmed.match(/---\s*\n([\s\S]*?)\n\s*---/);
-  if (betweenMarkers && betweenMarkers[1]) {
-    const content = betweenMarkers[1].trim().replace(/\s+/g, ' ');
-    return content.slice(0, 120) || 'Task completed';
-  }
-  if (trimmed.includes('New request:')) {
-    const after = trimmed.split('New request:')[1];
-    if (after) {
-      const firstLine = after.trim().split('\n')[0].replace(/\s+/g, ' ').slice(0, 120);
-      return firstLine || 'Task completed';
-    }
-  }
-  return trimmed.replace(/\s+/g, ' ').slice(0, 120) || 'Task completed';
+  const content = extractTaskContentFromPrompt(prompt, 500);
+  if (!content) return 'Task completed';
+  const oneLine = content.replace(/\s+/g, ' ').trim();
+  return oneLine.slice(0, 120) || 'Task completed';
 }
 
 /**
@@ -504,7 +509,13 @@ export async function processPendingDelegationTasks() {
           console.warn('[job-pipeline] handoff:', handoffErr.message);
         }
       }
-      appendDelegationResponseToAgentChat(task.to_agent_id, extractTaskSummaryFromPrompt(task.prompt), responseText);
+      appendDelegationResponseToAgentChat(
+        task.to_agent_id,
+        isAgentWorkflowPrompt(task.prompt)
+          ? extractTaskContentFromPrompt(task.prompt)
+          : extractTaskSummaryFromPrompt(task.prompt),
+        responseText
+      );
       const summary = extractTaskSummaryFromPrompt(task.prompt);
       await appendToAgentMemory(task.to_agent_id, summary);
     } catch (err) {

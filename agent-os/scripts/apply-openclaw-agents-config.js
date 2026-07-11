@@ -5,9 +5,9 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
+import { resolveOpenClawDir } from './lib/openclaw-paths.js';
 
-const USERPROFILE = process.env.USERPROFILE || process.env.HOME || '';
-const OPENCLAW_DIR = join(USERPROFILE, '.openclaw');
+const OPENCLAW_DIR = resolveOpenClawDir();
 const CONFIG_PATH = join(OPENCLAW_DIR, 'openclaw.json');
 
 // Use forward slashes so JSON is valid and OpenClaw accepts them on Windows
@@ -25,6 +25,7 @@ const CONTENT_TOOLS_ALLOW = [
   'kanban_assign_task',
   'intent_classify_and_delegate',
   'agent_workflow_list',
+  'agent_workflow_enquire',
   'agent_workflow_trigger',
 ];
 const CONTENT_TOOLS_CONFIG = { allow: [...CONTENT_TOOLS_ALLOW], deny: ['image'] };
@@ -42,6 +43,7 @@ const AGENTS_LIST = [
     tools: {
       allow: [
         'agent_workflow_list',
+        'agent_workflow_enquire',
         'agent_workflow_trigger',
         'agent_workflow_get_draft',
         'agent_workflow_mutate',
@@ -179,6 +181,17 @@ config.plugins.entries['agent-os-content-tools'] = {
 if (!config.plugins.allow) config.plugins.allow = [];
 if (!config.plugins.allow.includes('agent-os-content-tools')) config.plugins.allow.push('agent-os-content-tools');
 
+// Bootstrap watcher: hot-reload SOUL/AGENTS/TOOLS/MEMORY from disk (Workspace UI edits).
+const bootstrapWatcherDir = toSlash(join(OPENCLAW_DIR, 'extensions', 'agent-os-bootstrap-watcher'));
+if (!config.plugins.load.paths.includes(bootstrapWatcherDir)) config.plugins.load.paths.push(bootstrapWatcherDir);
+const existingBootstrap = config.plugins.entries['agent-os-bootstrap-watcher'];
+config.plugins.entries['agent-os-bootstrap-watcher'] = {
+  ...existingBootstrap,
+  enabled: true,
+  config: existingBootstrap?.config || {},
+};
+if (!config.plugins.allow.includes('agent-os-bootstrap-watcher')) config.plugins.allow.push('agent-os-bootstrap-watcher');
+
 // Browser automation (Playwright-managed openclaw profile). Install: .\scripts\install-openclaw-playwright.ps1
 // Root browser block activates bundled browser tool; do not add "browser" to plugins.allow.
 if (!config.browser) config.browser = {};
@@ -201,6 +214,7 @@ const contentToolNames = [
   'kanban_assign_task',
   'intent_classify_and_delegate',
   'agent_workflow_list',
+  'agent_workflow_enquire',
   'agent_workflow_trigger',
   'agent_workflow_get_draft',
   'agent_workflow_mutate',

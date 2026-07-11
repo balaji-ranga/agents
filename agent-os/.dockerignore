@@ -1,0 +1,29 @@
+# Dependencies and build output
+**/node_modules
+frontend/dist
+frontend/.vite
+backend/data
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Secrets and local env
+.env
+.env.*
+**/.env
+**/.env.local
+
+# VCS and IDE
+.git
+.gitignore
+.idea
+.vscode
+**/.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Dev / test artifacts (keep scripts and templates in image)
+agent-os/backend/data/

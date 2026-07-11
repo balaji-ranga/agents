@@ -4,9 +4,9 @@
 import { getDb } from '../db/schema.js';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
+import { getOpenClawDir } from '../config/openclaw-paths.js';
 
-const USERPROFILE = process.env.USERPROFILE || process.env.HOME || '';
-const OPENCLAW_DIR = join(USERPROFILE, '.openclaw');
+const OPENCLAW_DIR = getOpenClawDir();
 const DEFAULT_TOOLS_LIST_PATH = join(OPENCLAW_DIR, 'agent-os-tools.json');
 
 export function getToolsListPath() {

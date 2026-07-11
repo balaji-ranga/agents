@@ -1,48 +1,201 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+
 import { api } from '../../api.js';
 import ChatMessageContent from '../ChatMessageContent.jsx';
+import { formatChatTimestamp } from '../../utils/formatDateTime.js';
+import { deriveWorkflowAgentUiEffects } from '../../utils/workflowAgentUiEffects.js';
+
+function chatStorageKey(workflowId) {
+  return `wf-agent-chat:${workflowId || 'global'}`;
+}
 
 /**
- * Floating Workflow Builder chat — creates/edits workflows via prompt; syncs graph to editor.
+ * Floating Workflow Builder chat — creates/edits/workflows via prompt; syncs graph to editor.
+ * In editor: chat history persists while the panel is closed/reopened until leaving the page.
  */
 export default function WorkflowAgentChat({
   workflowId: initialWorkflowId = null,
   onGraphUpdated,
   onWorkflowCreated,
   onWorkflowMetaUpdated,
+  onAgentEffects,
+  autoNavigate = true,
+  onEditor = false,
 }) {
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [workflowId, setWorkflowId] = useState(initialWorkflowId);
   const [turns, setTurns] = useState([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const [error, setError] = useState(null);
   const scrollRef = useRef(null);
+  const panelRef = useRef(null);
 
   useEffect(() => {
     setWorkflowId(initialWorkflowId);
   }, [initialWorkflowId]);
+
+  const loadHistory = useCallback(async (wfId) => {
+    setLoadingHistory(true);
+    try {
+      const res = await api.agentWorkflowAgentChatHistory(wfId, 100);
+      const serverTurns = (res.turns || []).map((t) => ({
+        role: t.role,
+        content: t.content,
+        created_at: t.created_at,
+      }));
+      if (onEditor) {
+        try {
+          const cached = sessionStorage.getItem(chatStorageKey(wfId));
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed) && parsed.length > serverTurns.length) {
+              setTurns(parsed);
+              setError(null);
+              return;
+            }
+          }
+        } catch {
+          /* use server */
+        }
+      }
+      setTurns(serverTurns);
+      setError(null);
+    } catch {
+      if (onEditor) {
+        try {
+          const cached = sessionStorage.getItem(chatStorageKey(wfId));
+          if (cached) {
+            setTurns(JSON.parse(cached));
+            return;
+          }
+        } catch {
+          /* fall through */
+        }
+      }
+      setTurns([]);
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, [onEditor]);
+
+  // Load history when workflow context changes (not when panel opens/closes)
+  useEffect(() => {
+    loadHistory(workflowId);
+  }, [workflowId, loadHistory]);
+
+  // Persist editor chat to sessionStorage until page navigation
+  useEffect(() => {
+    if (!onEditor) return;
+    try {
+      sessionStorage.setItem(chatStorageKey(workflowId), JSON.stringify(turns));
+    } catch {
+      /* quota */
+    }
+  }, [turns, workflowId, onEditor]);
+
+  useEffect(() => {
+    if (!onEditor) return undefined;
+    return () => {
+      try {
+        sessionStorage.removeItem(chatStorageKey(workflowId));
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [workflowId, onEditor]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [turns, sending, open]);
 
+  const runAutoNavigate = useCallback(
+    (effects) => {
+      if (!autoNavigate || !effects?.navigate) return;
+      const { type, workflowId: wfId, runId } = effects.navigate;
+      if (type === 'list') {
+        navigate('/workflows');
+        return;
+      }
+      if (type === 'editor' && wfId) {
+        navigate(`/workflows/${wfId}/edit`);
+        return;
+      }
+      if (type === 'run' && runId) {
+        navigate(`/workflows?run_id=${runId}`);
+      }
+    },
+    [autoNavigate, navigate]
+  );
+
   const applyResponse = useCallback(
-    (res) => {
+    async (res) => {
+      const effectiveId = res.workflow_id || workflowId;
+      const effects = deriveWorkflowAgentUiEffects(res, {
+        currentWorkflowId: workflowId,
+        onEditor,
+      });
+
       if (res.workflow_id && res.workflow_id !== workflowId) {
         setWorkflowId(res.workflow_id);
         onWorkflowCreated?.(res.workflow_id, res.workflow);
       }
-      if (res.draft_graph && onGraphUpdated) {
-        onGraphUpdated(res.draft_graph, res.workflow);
+
+      let graph = res.draft_graph;
+      let meta = res.workflow;
+
+      if (effects.needsGraphRefresh && effectiveId && !graph) {
+        try {
+          const draft = await api.agentWorkflowDraftGet(effectiveId);
+          graph = draft.draft_graph || graph;
+          meta = {
+            id: draft.workflow_id,
+            name: draft.name,
+            status: draft.status,
+            paused: draft.paused,
+            chat_trigger_phrase: draft.chat_trigger_phrase,
+            ...(meta || {}),
+          };
+        } catch {
+          /* keep response payload */
+        }
       }
-      if (res.workflow && onWorkflowMetaUpdated) {
-        onWorkflowMetaUpdated(res.workflow);
+
+      if (graph && onGraphUpdated) {
+        onGraphUpdated(graph, meta);
+      } else if (meta && onWorkflowMetaUpdated) {
+        onWorkflowMetaUpdated(meta);
+      } else if (effects.lifecycleChanged && effectiveId && onWorkflowMetaUpdated) {
+        try {
+          const wf = await api.agentWorkflowGet(effectiveId);
+          onWorkflowMetaUpdated({
+            id: wf.id,
+            name: wf.name,
+            status: wf.status,
+            paused: wf.paused,
+            chat_trigger_phrase: wf.chat_trigger_phrase,
+          });
+        } catch {
+          /* ignore */
+        }
       }
+
+      onAgentEffects?.(effects, res);
+      runAutoNavigate(effects);
     },
-    [workflowId, onGraphUpdated, onWorkflowCreated, onWorkflowMetaUpdated]
+    [
+      workflowId,
+      onGraphUpdated,
+      onWorkflowCreated,
+      onWorkflowMetaUpdated,
+      onAgentEffects,
+      onEditor,
+      runAutoNavigate,
+    ]
   );
 
   const pollDraft = useCallback(() => {
@@ -55,6 +208,7 @@ export default function WorkflowAgentChat({
             id: draft.workflow_id,
             name: draft.name,
             status: draft.status,
+            paused: draft.paused,
           });
         }
       })
@@ -70,33 +224,38 @@ export default function WorkflowAgentChat({
   const send = async (e) => {
     e?.preventDefault();
     if (!input.trim() || sending) return;
+
     const msg = input.trim();
     setInput('');
     setSending(true);
     setError(null);
+
     const history = turns.map((t) => ({ role: t.role, content: t.content }));
-    setTurns((prev) => [...prev, { role: 'user', content: msg }]);
+    setTurns((prev) => [...prev, { role: 'user', content: msg, created_at: new Date().toISOString() }]);
+
     try {
       const res = await api.agentWorkflowAgentChat({
         message: msg,
         workflow_id: workflowId,
         history,
       });
-      applyResponse(res);
-      let assistantText = res.reply || '(no reply)';
-      if (res.actions_applied?.length) {
-        const summary = res.actions_applied
-          .map((a) => `${a.action}${a.node_id ? `: ${a.node_id}` : ''}${a.workflow_id ? ` → ${a.workflow_id}` : ''}`)
-          .join(', ');
-        assistantText += `\n\n_Applied: ${summary}_`;
-      }
-      if (res.workflow_triggered) {
-        assistantText += `\n\n▶ Run #${res.workflow_triggered.run_number} started.`;
-      }
-      setTurns((prev) => [...prev, { role: 'assistant', content: assistantText }]);
+      await applyResponse(res);
+      const assistantContent = res.reply || '(no reply)';
+      setTurns((prev) => [
+        ...prev,
+        { role: 'assistant', content: assistantContent, created_at: new Date().toISOString() },
+      ]);
     } catch (err) {
-      setError(err.message || 'Chat failed');
-      setTurns((prev) => prev.slice(0, -1));
+      const errMsg = err.message || 'Chat failed';
+      setError(errMsg);
+      setTurns((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `**Error:** ${errMsg}`,
+          created_at: new Date().toISOString(),
+        },
+      ]);
     } finally {
       setSending(false);
     }
@@ -118,66 +277,90 @@ export default function WorkflowAgentChat({
       </button>
 
       {open && (
-        <div className="wf-agent-panel">
-          <header className="wf-agent-panel-header">
-            <div>
-              <strong>Workflow Builder</strong>
-              <div className="wf-agent-panel-meta">
-                {workflowId ? (
-                  <>
-                    Editing <code>{workflowId}</code>
-                    {' · '}
-                    <Link to={`/workflows/${workflowId}/edit`}>Open editor</Link>
-                  </>
-                ) : (
-                  'Describe a workflow to create or edit'
-                )}
+        <>
+          <div
+            className="wf-agent-backdrop"
+            onClick={() => setOpen(false)}
+            aria-hidden="true"
+          />
+          <div ref={panelRef} className="wf-agent-panel" role="dialog" aria-label="Workflow Builder chat">
+            <header className="wf-agent-panel-header">
+              <div>
+                <strong>Workflow Builder</strong>
+                <div className="wf-agent-panel-meta">
+                  {workflowId ? (
+                    <>
+                      Editing <code>{workflowId}</code>
+                      {!onEditor && (
+                        <>
+                          {' · '}
+                          <Link to={`/workflows/${workflowId}/edit`}>Open editor</Link>
+                        </>
+                      )}
+                    </>
+                  ) : (
+                    'Describe a workflow to create or edit'
+                  )}
+                </div>
               </div>
+              <button type="button" className="wf-agent-close" onClick={() => setOpen(false)} aria-label="Close">
+                ×
+              </button>
+            </header>
+
+            {error && <div className="wf-agent-error">{error}</div>}
+
+            <div ref={scrollRef} className="wf-agent-messages chat-scroll-panel">
+              {loadingHistory && turns.length === 0 && (
+                <p className="wf-agent-hint">Loading chat history…</p>
+              )}
+              {!loadingHistory && turns.length === 0 && (
+                <p className="wf-agent-hint">
+                  Try: &quot;Add a brain node with guardrails against sexual/abusive content and publish&quot;
+                  <br />
+                  &quot;Create a workflow: Brain summarizes input → CEO approval&quot;
+                  <br />
+                  &quot;explain brain node config&quot;
+                  <br />
+                  &quot;test brain approval&quot; · &quot;inspect run 3&quot;
+                </p>
+              )}
+              {turns.map((t, i) => (
+                <div key={i} className={`wf-agent-msg wf-agent-msg-${t.role}`}>
+                  {t.created_at && (
+                    <time
+                      className="wf-agent-msg-time"
+                      dateTime={t.created_at}
+                      style={{ fontSize: '0.68rem', color: 'var(--muted)', display: 'block', marginBottom: 4 }}
+                    >
+                      {formatChatTimestamp(t.created_at)}
+                    </time>
+                  )}
+                  <ChatMessageContent content={t.content} />
+                </div>
+              ))}
+              {sending && <div className="wf-agent-msg wf-agent-msg-assistant wf-agent-thinking">Thinking…</div>}
             </div>
-            <button type="button" className="wf-agent-close" onClick={() => setOpen(false)} aria-label="Close">
-              ×
-            </button>
-          </header>
 
-          {error && <div className="wf-agent-error">{error}</div>}
-
-          <div ref={scrollRef} className="wf-agent-messages chat-scroll-panel">
-            {turns.length === 0 && (
-              <p className="wf-agent-hint">
-                Try: &quot;Create a workflow: Brain summarizes input → CEO approval → if approved run Tech
-                Researcher&quot;
-                <br />
-                Or: &quot;Add an email step after the agent with subject Daily update&quot;
-                <br />
-                Or: &quot;Run brain approval test&quot;
-              </p>
-            )}
-            {turns.map((t, i) => (
-              <div key={i} className={`wf-agent-msg wf-agent-msg-${t.role}`}>
-                <ChatMessageContent content={t.content} />
-              </div>
-            ))}
-            {sending && <div className="wf-agent-msg wf-agent-msg-assistant wf-agent-thinking">Thinking…</div>}
+            <form className="wf-agent-input-row" onSubmit={send}>
+              <textarea
+                rows={2}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Edit workflow, run/test, pause, inspect runs, fix failures…"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    send(e);
+                  }
+                }}
+              />
+              <button type="submit" className="wf-btn-primary" disabled={sending || !input.trim()}>
+                Send
+              </button>
+            </form>
           </div>
-
-          <form className="wf-agent-input-row" onSubmit={send}>
-            <textarea
-              rows={2}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Describe workflow changes or ask to run a workflow…"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  send(e);
-                }
-              }}
-            />
-            <button type="submit" className="wf-btn-primary" disabled={sending || !input.trim()}>
-              Send
-            </button>
-          </form>
-        </div>
+        </>
       )}
     </>
   );

@@ -4,9 +4,9 @@
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { resolveOpenClawDir, resolveOpenClawConfigPath } from './lib/openclaw-paths.js';
 
-const homedir = process.env.USERPROFILE || process.env.HOME || '';
-const CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || join(homedir, '.openclaw', 'openclaw.json');
+const CONFIG_PATH = resolveOpenClawConfigPath();
 
 let config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
 if (!config.browser) config.browser = { enabled: true, defaultProfile: 'openclaw' };

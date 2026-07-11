@@ -5,7 +5,7 @@ import { Router } from 'express';
 import { requireCeoOrAdmin, resolveAuthenticatedCeoUserId } from '../middleware/auth.js';
 import * as store from '../services/agent-workflow-store.js';
 import { syncWorkflowScheduleRegistry } from '../services/agent-workflow-store.js';
-import { startAgentWorkflowRun, completeCeoApprovalResponse } from '../services/agent-workflow-runner.js';
+import { startAgentWorkflowRun, completeCeoApprovalResponse, stopSseListen } from '../services/agent-workflow-runner.js';
 import { refreshAgentWorkflowSchedules, stopScheduleForDefinition, getScheduleRegistrySnapshot } from '../services/agent-workflow-scheduler.js';
 import { getTaskCatalog } from '../services/agent-workflow-task-catalog.js';
 import { getWorkflowTemplates, getWorkflowTemplate } from '../services/agent-workflow-templates.js';
@@ -16,7 +16,8 @@ import {
   deleteAllRuns,
   deleteDefinitionWithCleanup,
 } from '../services/agent-workflow-run-manager.js';
-import { runWorkflowBuilderChat } from '../services/agent-workflow-agent.js';
+import { getHookInfo } from '../services/agent-workflow-webhooks.js';
+import { runWorkflowBuilderChat, getWorkflowBuilderChatHistory } from '../services/agent-workflow-agent.js';
 import { applyWorkflowBuilderActions, getWorkflowDraftForAgent } from '../services/agent-workflow-builder.js';
 
 const router = Router();
@@ -58,7 +59,8 @@ router.get('/meta/templates/:templateId', (req, res) => {
 router.get('/', (req, res) => {
   try {
     const ownerUserId = resolveAuthenticatedCeoUserId(req);
-    res.json({ workflows: store.listDefinitions(ownerUserId) });
+    const search = String(req.query.q || req.query.search || '').trim();
+    res.json({ workflows: store.listDefinitions(ownerUserId, { search }) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -67,14 +69,28 @@ router.get('/', (req, res) => {
 router.get('/runs', (req, res) => {
   try {
     const ownerUserId = resolveAuthenticatedCeoUserId(req);
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
-    res.json({ runs: store.listAllRuns(ownerUserId, limit) });
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const search = String(req.query.q || req.query.search || '').trim();
+    res.json(store.listAllRunsPaginated(ownerUserId, { page, limit, search }));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
 /** Workflow Builder agent chat — creates/edits graph via LLM actions; returns draft_graph for live UI sync. */
+router.get('/agent-chat/history', (req, res) => {
+  try {
+    const ownerUserId = resolveAuthenticatedCeoUserId(req);
+    const workflowId = req.query.workflow_id || null;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 200);
+    const turns = getWorkflowBuilderChatHistory(ownerUserId, workflowId || null, limit);
+    res.json({ turns, workflow_id: workflowId || null });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.post('/agent-chat', async (req, res) => {
   try {
     const ownerUserId = resolveAuthenticatedCeoUserId(req, req.body);
@@ -199,6 +215,18 @@ router.delete('/runs/all', (req, res) => {
   }
 });
 
+router.post('/runs/:runId/listen/:nodeId/stop', async (req, res) => {
+  try {
+    const ownerUserId = resolveAuthenticatedCeoUserId(req, req.body);
+    const result = await stopSseListen(Number(req.params.runId), req.params.nodeId, ownerUserId, {
+      actor: actorFromRequest(req),
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 router.post('/runs/:runId/pause', (req, res) => {
   try {
     const ownerUserId = resolveAuthenticatedCeoUserId(req, req.body);
@@ -227,6 +255,17 @@ router.get('/runs/:runId', (req, res) => {
     const run = store.getRun(Number(req.params.runId), ownerUserId);
     if (!run) return res.status(404).json({ error: 'Run not found' });
     res.json(run);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/:id/hook', (req, res) => {
+  try {
+    const ownerUserId = resolveAuthenticatedCeoUserId(req);
+    const info = getHookInfo(req.params.id, ownerUserId);
+    if (!info) return res.status(404).json({ error: 'Workflow not found' });
+    res.json(info);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -300,6 +339,20 @@ router.post('/:id/publish', (req, res) => {
     const ownerUserId = resolveAuthenticatedCeoUserId(req, req.body);
     const def = store.publishDefinition(req.params.id, ownerUserId, actorFromRequest(req));
     if (!def) return res.status(404).json({ error: 'Workflow not found' });
+    refreshAgentWorkflowSchedules();
+    res.json(def);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/:id/unpublish', (req, res) => {
+  try {
+    const ownerUserId = resolveAuthenticatedCeoUserId(req, req.body);
+    const actor = actorFromRequest(req);
+    const def = store.unpublishDefinition(req.params.id, ownerUserId, actor);
+    if (!def) return res.status(404).json({ error: 'Workflow not found' });
+    stopScheduleForDefinition(req.params.id);
     refreshAgentWorkflowSchedules();
     res.json(def);
   } catch (e) {

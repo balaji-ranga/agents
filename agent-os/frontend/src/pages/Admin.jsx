@@ -10,7 +10,7 @@ function AdminPanel() {
   const [selected, setSelected] = useState(null);
   const [selectedAgents, setSelectedAgents] = useState([]);
   const [error, setError] = useState(null);
-  const [form, setForm] = useState({ name: '', email: '', password: '', region: '', mobile: '' });
+  const [form, setForm] = useState({ name: '', email: '', password: '', region: '', mobile: '', db_mode: 'tenant' });
 
   const load = () => {
     api.adminUsers().then((r) => setUsers(r.users || [])).catch((e) => setError(e.message));
@@ -37,7 +37,7 @@ function AdminPanel() {
   const registerUser = async (e) => {
     e.preventDefault();
     await api.adminRegisterUser(form);
-    setForm({ name: '', email: '', password: '', region: '', mobile: '' });
+    setForm({ name: '', email: '', password: '', region: '', mobile: '', db_mode: 'tenant' });
     load();
   };
 
@@ -53,6 +53,7 @@ function AdminPanel() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h1 style={{ margin: 0 }}>Admin</h1>
         <div style={{ display: 'flex', gap: '0.75rem' }}>
+          <Link to="/integrations/mcp">MCP Integrations</Link>
           <Link to="/">Dashboard</Link>
           <button type="button" onClick={logout} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '0.35rem 0.65rem', cursor: 'pointer' }}>
             Logout
@@ -78,6 +79,11 @@ function AdminPanel() {
               >
                 <div style={{ fontWeight: 600 }}>{u.name} <span style={{ color: 'var(--muted)', fontWeight: 400 }}>({u.role})</span></div>
                 <div style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>{u.email}</div>
+                {u.role === 'ceo' && (
+                  <div style={{ fontSize: '0.78rem', color: 'var(--muted)', marginTop: 2 }}>
+                    DB: {u.ceo_db_mode === 'shared' ? 'shared platform' : 'dedicated tenant'}
+                  </div>
+                )}
                 <div style={{ marginTop: 4, display: 'flex', gap: 8 }}>
                   <span style={{ fontSize: '0.8rem', color: u.enabled ? '#22c55e' : '#f87171' }}>{u.enabled ? 'Enabled' : 'Disabled'}</span>
                   <button
@@ -102,6 +108,10 @@ function AdminPanel() {
             <input placeholder="Password" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required style={{ padding: '0.45rem', borderRadius: 6, border: '1px solid var(--border)' }} />
             <input placeholder="Region" value={form.region} onChange={(e) => setForm({ ...form, region: e.target.value })} style={{ padding: '0.45rem', borderRadius: 6, border: '1px solid var(--border)' }} />
             <input placeholder="Mobile" value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })} style={{ padding: '0.45rem', borderRadius: 6, border: '1px solid var(--border)' }} />
+            <select value={form.db_mode} onChange={(e) => setForm({ ...form, db_mode: e.target.value })} style={{ padding: '0.45rem', borderRadius: 6, border: '1px solid var(--border)' }}>
+              <option value="tenant">Dedicated tenant DB</option>
+              <option value="shared">Shared platform DB</option>
+            </select>
             <button type="submit" style={{ padding: '0.5rem', borderRadius: 6, background: 'var(--accent)', color: '#fff', border: 'none' }}>Register user</button>
           </form>
         </section>
@@ -111,6 +121,11 @@ function AdminPanel() {
           {!selected && <p style={{ color: 'var(--muted)' }}>Select a user to manage agent access.</p>}
           {selected && (
             <>
+              <p style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
+                {selected.ceo_db_mode === 'shared'
+                  ? 'Uses shared platform database for jobs/kanban/chat.'
+                  : 'Uses dedicated tenant SQLite database for jobs/kanban/chat.'}
+              </p>
               <p style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>Standard agents ship with every CEO. Toggle access per user.</p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {selectedAgents.map((a) => (

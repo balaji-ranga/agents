@@ -6,11 +6,11 @@
 import { join } from 'path';
 import { copyFileSync, mkdirSync, readdirSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
+import { resolveOpenClawExtensionsDir } from './lib/openclaw-paths.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const AGENT_OS_ROOT = join(__dirname, '..');
-const USERPROFILE = process.env.USERPROFILE || process.env.HOME || '';
-const OPENCLAW_EXTENSIONS = join(USERPROFILE, '.openclaw', 'extensions');
+const OPENCLAW_EXTENSIONS = resolveOpenClawExtensionsDir();
 const SOURCE = join(AGENT_OS_ROOT, 'openclaw-extensions', 'agent-os-content-tools');
 
 if (!existsSync(SOURCE)) {

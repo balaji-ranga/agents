@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import ChatMessageContent from '../components/ChatMessageContent';
+import { formatLocalDateTime, formatChatTimestamp, toLocalDateTimeInputValue } from '../utils/formatDateTime.js';
 
 // Build hierarchy: CEO (me) → COO → delegated agents
 function buildHierarchy(agents) {
@@ -75,7 +76,7 @@ export default function Dashboard() {
   const [standupScheduledAt, setStandupScheduledAt] = useState(() => {
     const d = new Date();
     d.setHours(9, 0, 0, 0);
-    return d.toISOString().slice(0, 16);
+    return toLocalDateTimeInputValue(d);
   });
   const [runningCoo, setRunningCoo] = useState(false);
   const [runningCronStandup, setRunningCronStandup] = useState(false);
@@ -557,7 +558,7 @@ export default function Dashboard() {
                   }}
                 >
                   <span style={{ flex: 1, minWidth: 0 }}>
-                    {new Date(s.scheduled_at).toLocaleString()} — {s.status}
+                    {formatLocalDateTime(s.scheduled_at)} — {s.status}
                     {s.source === 'cron' && <span style={{ opacity: 0.9, fontSize: '0.8rem' }}> (auto)</span>}
                   </span>
                   <button
@@ -609,7 +610,7 @@ export default function Dashboard() {
               <>
                 <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
                   <strong style={{ fontSize: '1rem' }}>
-                    COO chat — {selectedStandup.title ? `${selectedStandup.title} · ` : ''}{new Date(selectedStandup.scheduled_at).toLocaleString()}
+                    COO chat — {selectedStandup.title ? `${selectedStandup.title} · ` : ''}{formatLocalDateTime(selectedStandup.scheduled_at)}
                   </strong>
                   <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                     <button
@@ -634,7 +635,16 @@ export default function Dashboard() {
                   {Array.isArray(selectedStandup.messages) && selectedStandup.messages.length > 0 ? (
                     selectedStandup.messages.map((m) => (
                       <div key={m.id}>
-                        <span style={{ fontWeight: 600, color: m.role === 'coo' ? 'var(--accent)' : 'var(--text)', fontSize: '0.9rem' }}>{m.role === 'coo' ? 'COO' : 'You'}:</span>
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', flexWrap: 'wrap' }}>
+                          <span style={{ fontWeight: 600, color: m.role === 'coo' ? 'var(--accent)' : 'var(--text)', fontSize: '0.9rem' }}>
+                            {m.role === 'coo' ? 'COO' : 'You'}:
+                          </span>
+                          {m.created_at && (
+                            <time dateTime={m.created_at} style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>
+                              {formatChatTimestamp(m.created_at)}
+                            </time>
+                          )}
+                        </div>
                         <div style={{ margin: '0.2rem 0 0', fontSize: '0.95rem' }}>
                           <ChatMessageContent content={m.content} />
                         </div>

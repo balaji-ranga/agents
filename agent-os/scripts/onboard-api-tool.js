@@ -23,6 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { resolveOpenClawDir } from './lib/openclaw-paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -33,8 +34,7 @@ const BACKEND = join(ROOT, 'backend');
 const { getDb, initDb } = await import(new URL('../backend/src/db/schema.js', import.meta.url).href);
 const meta = await import(new URL('../backend/src/services/content-tools-meta.js', import.meta.url).href);
 
-const USERPROFILE = process.env.USERPROFILE || process.env.HOME || '';
-const OPENCLAW_DIR = join(USERPROFILE, '.openclaw');
+const OPENCLAW_DIR = resolveOpenClawDir();
 const CONFIG_PATH = join(OPENCLAW_DIR, 'openclaw.json');
 const OVERRIDES_PATH = join(OPENCLAW_DIR, 'agent-os-tool-overrides.json');
 

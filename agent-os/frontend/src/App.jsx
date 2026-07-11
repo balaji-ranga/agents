@@ -15,6 +15,9 @@ import UserProfile from './pages/UserProfile';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Admin from './pages/Admin';
+import McpIntegrations from './pages/McpIntegrations';
+import CustomScripts from './pages/CustomScripts';
+import ExternalAgents from './pages/ExternalAgents';
 import NotificationBell from './components/NotificationBell';
 import { useAuth } from './context/AuthContext';
 
@@ -78,9 +81,20 @@ function Shell() {
           </div>
         )}
         {user.role === 'admin' && (
-          <NavLink to="/admin" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Admin">
-            {navCollapsed ? 'A' : 'Admin'}
-          </NavLink>
+          <>
+            <NavLink to="/admin" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Admin">
+              {navCollapsed ? 'A' : 'Admin'}
+            </NavLink>
+            <NavLink to="/integrations/mcp" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="MCP">
+              {navCollapsed ? 'M' : 'MCP'}
+            </NavLink>
+            <NavLink to="/integrations/custom-scripts" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Custom scripts">
+              {navCollapsed ? 'Py' : 'Custom scripts'}
+            </NavLink>
+            <NavLink to="/integrations/external-agents" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="External agents (A2A)">
+              {navCollapsed ? 'A2A' : 'External agents'}
+            </NavLink>
+          </>
         )}
         {user.role === 'ceo' && (
           <>
@@ -91,6 +105,9 @@ function Shell() {
             <NavLink to="/kanban" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Kanban">{navCollapsed ? 'K' : 'Kanban'}</NavLink>
             <NavLink to="/workspace" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Workspace">{navCollapsed ? 'Ws' : 'Workspace (MD)'}</NavLink>
             <NavLink to="/content-tools" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Content tools">{navCollapsed ? 'Ct' : 'Content tools'}</NavLink>
+            <NavLink to="/integrations/mcp" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="MCP integrations">{navCollapsed ? 'Mcp' : 'MCP'}</NavLink>
+            <NavLink to="/integrations/custom-scripts" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Custom scripts (LangGraph)">{navCollapsed ? 'Py' : 'Custom scripts'}</NavLink>
+            <NavLink to="/integrations/external-agents" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="External agents (A2A)">{navCollapsed ? 'A2A' : 'External agents'}</NavLink>
             <NavLink to="/broadcast" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Broadcast">{navCollapsed ? 'Bc' : 'Broadcast'}</NavLink>
           </>
         )}
@@ -108,6 +125,9 @@ function Shell() {
           {user.role === 'admin' && (
             <>
               <Route path="/admin" element={<Admin />} />
+              <Route path="/integrations/mcp/*" element={<McpIntegrations />} />
+              <Route path="/integrations/custom-scripts" element={<CustomScripts />} />
+              <Route path="/integrations/external-agents" element={<ExternalAgents />} />
               <Route path="/profile" element={<UserProfile />} />
               <Route path="*" element={<Navigate to="/admin" replace />} />
             </>
@@ -119,6 +139,9 @@ function Shell() {
               <Route path="/job-profiles" element={<JobProfiles />} />
               <Route path="/workspace" element={<Workspace />} />
               <Route path="/content-tools" element={<ContentToolsLogs />} />
+              <Route path="/integrations/mcp/*" element={<McpIntegrations />} />
+              <Route path="/integrations/custom-scripts" element={<CustomScripts />} />
+              <Route path="/integrations/external-agents" element={<ExternalAgents />} />
               <Route path="/broadcast" element={<Broadcast />} />
               <Route path="/kanban" element={<Kanban />} />
               <Route path="/job-workflows" element={<JobWorkflows />} />

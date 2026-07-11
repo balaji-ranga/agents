@@ -69,11 +69,16 @@ Recent completions (topic/request summary and date). Keep only the last 20–30 
 - (Add lines here as you complete tasks; oldest entries can be removed when the list grows.)
 `;
 
+const TOOLS_MD = readTemplate('TOOLS.md');
+
 writeFileSync(join(WORKSPACE_PATH, 'SOUL.md'), SOUL_MD, 'utf8');
 writeFileSync(join(WORKSPACE_PATH, 'AGENTS.md'), AGENTS_MD, 'utf8');
 if (!existsSync(join(WORKSPACE_PATH, 'MEMORY.md'))) {
   writeFileSync(join(WORKSPACE_PATH, 'MEMORY.md'), MEMORY_MD, 'utf8');
 }
+if (TOOLS_MD) {
+  writeFileSync(join(WORKSPACE_PATH, 'TOOLS.md'), TOOLS_MD, 'utf8');
+}
 
 console.log('COO workspace updated:', WORKSPACE_PATH);
-console.log('  SOUL.md, AGENTS.md, MEMORY.md (if new) written.');
+console.log('  SOUL.md, AGENTS.md, MEMORY.md (if new)' + (TOOLS_MD ? ', TOOLS.md' : '') + ' written.');

@@ -1,8 +1,18 @@
-/** Fixed toast-style banner for action success / failure. */
+/** Fixed toast-style banner for action success / failure. Renders via portal so it stays visible over the workflow editor. */
+import { createPortal } from 'react-dom';
+import { useEffect, useState } from 'react';
+
 export default function ActionFeedbackBanner({ feedback, onDismiss }) {
-  if (!feedback?.message) return null;
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted || !feedback?.message) return null;
+
   const isSuccess = feedback.type === 'success';
-  return (
+  const node = (
     <div
       className={`action-feedback action-feedback--${isSuccess ? 'success' : 'error'}`}
       role="status"
@@ -19,4 +29,6 @@ export default function ActionFeedbackBanner({ feedback, onDismiss }) {
       )}
     </div>
   );
+
+  return createPortal(node, document.body);
 }

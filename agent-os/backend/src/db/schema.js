@@ -403,6 +403,15 @@ export function initDb() {
   } catch (_) {}
 
   try {
+    _db.exec(`ALTER TABLE platform_users ADD COLUMN ceo_db_mode TEXT DEFAULT 'tenant'`);
+  } catch (_) {}
+  try {
+    const balaId = (process.env.AGENT_OS_BALA_CEO_ID || 'ceo-bala').trim();
+    _db.prepare(`UPDATE platform_users SET ceo_db_mode = 'shared' WHERE id = ?`).run(balaId);
+    _db.prepare(`UPDATE platform_users SET ceo_db_mode = 'shared' WHERE id = 'default'`);
+  } catch (_) {}
+
+  try {
     _db.exec(`ALTER TABLE agents ADD COLUMN agent_type TEXT DEFAULT 'standard'`);
   } catch (_) {}
   try {
@@ -487,6 +496,23 @@ export function initDb() {
   try {
     _db.exec(`ALTER TABLE agent_workflow_definitions ADD COLUMN paused INTEGER DEFAULT 0`);
   } catch (_) {}
+  try {
+    _db.exec(`ALTER TABLE agent_workflow_definitions ADD COLUMN webhook_secret TEXT`);
+  } catch (_) {}
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_workflow_pending_listeners (
+        run_id INTEGER NOT NULL,
+        node_id TEXT NOT NULL,
+        mcp_server_id TEXT,
+        events_path TEXT DEFAULT '/events/stream',
+        timeout_ms INTEGER DEFAULT 30000,
+        started_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (run_id, node_id),
+        FOREIGN KEY (run_id) REFERENCES agent_workflow_runs(id) ON DELETE CASCADE
+      )
+    `);
+  } catch (_) {}
 
   try {
     _db.exec(`
@@ -509,6 +535,160 @@ export function initDb() {
       )
     `);
     _db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_wf_schedules_enabled ON agent_workflow_schedules(enabled)`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_workflow_chat_turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL DEFAULT '',
+        role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+        content TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_agent_wf_chat_thread ON agent_workflow_chat_turns(owner_user_id, workflow_id, created_at)`
+    );
+  } catch (_) {}
+
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_servers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        transport TEXT NOT NULL DEFAULT 'streamable_http',
+        url TEXT,
+        command TEXT,
+        args_json TEXT DEFAULT '[]',
+        cwd TEXT,
+        env_json TEXT DEFAULT '{}',
+        headers_json TEXT DEFAULT '{}',
+        auth_secret_env TEXT DEFAULT '',
+        owner_user_id TEXT NOT NULL,
+        owner_role TEXT NOT NULL CHECK (owner_role IN ('admin', 'ceo')),
+        is_platform INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'healthy', 'disabled')),
+        last_health_at TEXT,
+        last_error TEXT,
+        server_info_json TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_tools_cache (
+        server_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        input_schema_json TEXT,
+        PRIMARY KEY (server_id, tool_name),
+        FOREIGN KEY (server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_prompts_cache (
+        server_id TEXT NOT NULL,
+        prompt_name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        arguments_schema_json TEXT,
+        PRIMARY KEY (server_id, prompt_name),
+        FOREIGN KEY (server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_resources_cache (
+        server_id TEXT NOT NULL,
+        resource_uri TEXT NOT NULL,
+        name TEXT DEFAULT '',
+        description TEXT DEFAULT '',
+        mime_type TEXT DEFAULT '',
+        PRIMARY KEY (server_id, resource_uri),
+        FOREIGN KEY (server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_call_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT,
+        tool_name TEXT,
+        user_id TEXT,
+        request_json TEXT,
+        response_json TEXT,
+        status TEXT,
+        latency_ms INTEGER,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_servers_owner ON mcp_servers(owner_user_id)`);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_servers_platform ON mcp_servers(is_platform)`);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_call_logs_server ON mcp_call_logs(server_id, created_at DESC)`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_tool_grants (
+        agent_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (agent_id, tool_name),
+        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+      )
+    `);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_tool_grants_agent ON agent_tool_grants(agent_id)`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS external_agents (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        card_url TEXT,
+        endpoint_url TEXT,
+        skill_id TEXT,
+        auth_header TEXT,
+        headers_json TEXT DEFAULT '{}',
+        agent_card_json TEXT,
+        owner_user_id TEXT NOT NULL,
+        owner_role TEXT NOT NULL CHECK (owner_role IN ('admin', 'ceo')),
+        is_platform INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'healthy', 'disabled')),
+        last_health_at TEXT,
+        last_error TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_external_agents_owner ON external_agents(owner_user_id)`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS custom_scripts (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        language TEXT NOT NULL DEFAULT 'python' CHECK (language IN ('python', 'javascript')),
+        runtime_profile TEXT NOT NULL DEFAULT 'restricted' CHECK (runtime_profile IN ('restricted', 'network')),
+        source TEXT NOT NULL,
+        scan_result_json TEXT,
+        scan_status TEXT DEFAULT 'pending' CHECK (scan_status IN ('pending', 'approved', 'rejected')),
+        risk_level TEXT DEFAULT 'low',
+        owner_user_id TEXT NOT NULL,
+        owner_role TEXT NOT NULL CHECK (owner_role IN ('admin', 'ceo')),
+        is_platform INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'disabled')),
+        last_run_at TEXT,
+        last_error TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_custom_scripts_owner ON custom_scripts(owner_user_id)`);
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_custom_scripts_status ON custom_scripts(status, scan_status)`);
   } catch (_) {}
 
   return _db;

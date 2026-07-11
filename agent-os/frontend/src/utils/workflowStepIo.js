@@ -15,7 +15,7 @@ function formatBindingList(items) {
   return items
     .map((i) => {
       const label = i.label || i.id || 'input';
-      const val = i.valuePreview ?? i.value ?? i.source ?? '';
+      const val = i.value ?? i.valuePreview ?? i.source ?? '';
       return `${label}: ${val}`;
     })
     .join('\n');
@@ -26,6 +26,8 @@ export function summarizeStepIo(io, kind = 'input') {
   const data = parseIoJson(io);
   if (!data) return '—';
   if (kind === 'input') {
+    if (data.resolved_prompt) return String(data.resolved_prompt).slice(0, 160);
+    if (data.prompt_template) return String(data.prompt_template).slice(0, 160);
     if (Array.isArray(data.inputs) && data.inputs.length) {
       return formatBindingList(data.inputs).slice(0, 160);
     }
@@ -54,6 +56,12 @@ export function formatStepIoFull(io, kind = 'input') {
       if (data.trigger) lines.push(`Trigger: ${data.trigger}`);
       if (data.initial_input != null) lines.push(`Initial input:\n${data.initial_input}`);
       sections.push({ title: 'Trigger', body: lines.join('\n\n') });
+    }
+    if (data.prompt_template) {
+      sections.push({ title: 'Prompt template', body: data.prompt_template });
+    }
+    if (data.resolved_prompt) {
+      sections.push({ title: 'Resolved prompt (sent to agent)', body: data.resolved_prompt });
     }
     const bindings = formatBindingList(data.inputs);
     if (bindings) sections.push({ title: 'Bindings', body: bindings });

@@ -20,6 +20,10 @@ import kanbanRoutes from './routes/kanban.js';
 import mediaRoutes from './routes/media.js';
 import jobApplicantRoutes from './routes/job-applicant.js';
 import agentWorkflowRoutes from './routes/agent-workflows.js';
+import agentWorkflowHookRoutes from './routes/agent-workflow-hooks.js';
+import mcpIntegrationsRoutes from './routes/mcp-integrations.js';
+import customScriptsRoutes from './routes/custom-scripts.js';
+import externalAgentsRoutes from './routes/external-agents.js';
 import authRoutes from './routes/auth.js';
 import adminRoutes from './routes/admin.js';
 import { attachAuthUser } from './middleware/auth.js';
@@ -29,12 +33,14 @@ import { seedDefaultAgentsIfEmpty } from './db/seed-default-agents.js';
 import { seedContentToolsMetaIfEmpty, seedKanbanToolsIfMissing, seedWorkflowToolsIfMissing, updateKanbanToolPurposes } from './db/seed-content-tools-meta.js';
 import { seedJobApplicantToolsIfMissing } from './db/seed-job-applicant-tools.js';
 import { writeOpenClawToolsList } from './services/content-tools-meta.js';
+import { importGrantsFromOpenClawConfig, syncAllowlistsFile } from './services/openclaw-agent-tools.js';
 import { runScheduledStandup } from './cron/standup.js';
 import { processPendingDelegationTasks } from './services/delegation-queue.js';
 import { runPipelineTick, runPipelineTickAll } from './services/job-applicant-pipeline.js';
 import { getLastIntentDebug } from './services/intent-classifier.js';
 import { initAgentWorkflowScheduler } from './services/agent-workflow-scheduler.js';
 import { syncWorkflowScheduleRegistry } from './services/agent-workflow-store.js';
+import { resumeStuckWorkflowRuns } from './services/agent-workflow-runner.js';
 import { seedWorkflowBuilderAgent } from '../scripts/seed-workflow-builder-agent.js';
 
 const app = express();
@@ -60,9 +66,21 @@ updateKanbanToolPurposes();
 seedJobApplicantToolsIfMissing();
 writeOpenClawToolsList();
 try {
+  const imported = importGrantsFromOpenClawConfig();
+  syncAllowlistsFile();
+  if (imported) console.log(`[startup] imported ${imported} agent tool grant(s) from openclaw.json`);
+} catch (e) {
+  console.warn('[startup] agent tool grants sync:', e.message);
+}
+try {
   seedWorkflowBuilderAgent();
 } catch (e) {
   console.warn('[startup] workflow builder agent seed:', e.message);
+}
+try {
+  resumeStuckWorkflowRuns();
+} catch (e) {
+  console.warn('[startup] workflow run resume:', e.message);
 }
 
 const healthHandler = (req, res) => {
@@ -92,7 +110,11 @@ apiRouter.use('/tools', toolsRoutes);
 apiRouter.use('/broadcast', broadcastRoutes);
 apiRouter.use('/kanban', kanbanRoutes);
 apiRouter.use('/job-applicant', jobApplicantRoutes);
+apiRouter.use('/agent-workflows/hooks', agentWorkflowHookRoutes);
 apiRouter.use('/agent-workflows', agentWorkflowRoutes);
+apiRouter.use('/integrations/mcp', mcpIntegrationsRoutes);
+apiRouter.use('/integrations/custom-scripts', customScriptsRoutes);
+apiRouter.use('/integrations/external-agents', externalAgentsRoutes);
 apiRouter.use('/media/openclaw', mediaRoutes);
 app.use('/api', apiRouter);
 
@@ -106,6 +128,7 @@ app.use('/tools', toolsRoutes);
 app.use('/broadcast', broadcastRoutes);
 app.use('/kanban', kanbanRoutes);
 app.use('/job-applicant', jobApplicantRoutes);
+app.use('/agent-workflows/hooks', agentWorkflowHookRoutes);
 app.use('/agent-workflows', agentWorkflowRoutes);
 app.use('/media/openclaw', mediaRoutes);
 

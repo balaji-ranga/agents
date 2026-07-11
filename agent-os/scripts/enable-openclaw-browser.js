@@ -9,10 +9,10 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
+import { resolveOpenClawDir, resolveOpenClawConfigPath } from './lib/openclaw-paths.js';
 
-const USERPROFILE = process.env.USERPROFILE || process.env.HOME || '';
-const OPENCLAW_DIR = join(USERPROFILE, '.openclaw');
-const CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || join(OPENCLAW_DIR, 'openclaw.json');
+const OPENCLAW_DIR = resolveOpenClawDir();
+const CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || resolveOpenClawConfigPath();
 
 let config = {};
 if (existsSync(CONFIG_PATH)) {

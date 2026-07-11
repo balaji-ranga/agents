@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api';
 
-const FILE_NAMES = ['soul', 'agents', 'memory'];
+const FILE_NAMES = ['soul', 'agents', 'memory', 'tools'];
+const TOOLS_TAB = '__tool_access__';
 
 export default function AgentWorkspace() {
   const { agentId } = useParams();
@@ -14,6 +15,10 @@ export default function AgentWorkspace() {
   const [clearingSessions, setClearingSessions] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [toolCatalog, setToolCatalog] = useState([]);
+  const [toolGrants, setToolGrants] = useState(new Set());
+  const [toolsSaving, setToolsSaving] = useState(false);
+  const [syncingMd, setSyncingMd] = useState(false);
 
   const clearSessions = () => {
     if (!window.confirm('Clear all OpenClaw sessions for this agent? Chat and task session history will be reset.')) return;
@@ -40,7 +45,17 @@ export default function AgentWorkspace() {
   }, [agentId]);
 
   useEffect(() => {
-    if (!agentId || !selected) return;
+    if (!agentId) return;
+    api.agentToolsGet(agentId)
+      .then((r) => {
+        setToolCatalog(r.tools || []);
+        setToolGrants(new Set((r.grants || []).map(String)));
+      })
+      .catch((e) => setError(e.message));
+  }, [agentId]);
+
+  useEffect(() => {
+    if (!agentId || !selected || selected === TOOLS_TAB) return;
     setLoading(true);
     api.agentWorkspaceRead(agentId, selected)
       .then((r) => setContent(r.text ?? ''))
@@ -58,10 +73,45 @@ export default function AgentWorkspace() {
       });
   };
 
+  const toggleTool = (name) => {
+    setToolGrants((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const saveTools = () => {
+    setToolsSaving(true);
+    setError(null);
+    api.agentToolsSet(agentId, [...toolGrants])
+      .then((r) => {
+        setToolCatalog(r.tools || []);
+        setToolGrants(new Set((r.grants || []).map(String)));
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setToolsSaving(false));
+  };
+
+  const syncTemplateMd = () => {
+    setSyncingMd(true);
+    setError(null);
+    api.agentToolsSyncTemplateMd(agentId)
+      .then(() => {
+        if (selected === 'tools') {
+          return api.agentWorkspaceRead(agentId, 'tools').then((r) => setContent(r.text ?? ''));
+        }
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setSyncingMd(false));
+  };
+
   if (error && !agent) return <div style={{ padding: '2rem', color: '#f87171' }}>Error: {error}. <Link to="/">Dashboard</Link></div>;
 
   const tabs = [...(files.files || []).map((f) => f.name), ...(files.daily || []).map((f) => `memory/${f.name}`)];
   const activeTabs = tabs.length ? tabs : FILE_NAMES;
+  const showToolsPanel = selected === TOOLS_TAB;
 
   return (
     <div style={{ padding: '2rem', height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -71,7 +121,7 @@ export default function AgentWorkspace() {
       </div>
       <h1 style={{ marginTop: 0 }}>Workspace — {agent?.name || agentId}</h1>
       <p style={{ color: 'var(--muted)', marginBottom: '1rem' }}>
-        Edit SOUL.md, AGENTS.md, MEMORY.md for this agent’s OpenClaw workspace. Saves write directly to these files (same files the OpenClaw gateway uses). Backups are created on save.
+        Edit workspace files and manage which Agent OS tools this agent can invoke. MD file saves write directly to OpenClaw workspace files and are picked up on the next agent message (bootstrap watcher). Tool access changes apply immediately without restart.
         {agent && !agent.workspace_path && ' (Using default workspace; set workspace_path on this agent for a separate folder.)'}
       </p>
 
@@ -94,10 +144,85 @@ export default function AgentWorkspace() {
             {name}
           </button>
         ))}
+        <button
+          type="button"
+          onClick={() => setSelected(TOOLS_TAB)}
+          style={{
+            padding: '0.5rem 1rem',
+            background: showToolsPanel ? 'var(--accent)' : 'var(--surface)',
+            border: `1px solid ${showToolsPanel ? 'var(--accent)' : 'var(--border)'}`,
+            borderRadius: 6,
+            color: showToolsPanel ? '#fff' : 'var(--text)',
+          }}
+        >
+          Tool access
+        </button>
       </div>
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 400 }}>
-        {loading ? (
+        {showToolsPanel ? (
+          <>
+            <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+              Grant or revoke Agent OS content tools for <strong>{agent?.name || agentId}</strong>.
+              Changes write to <code>~/.openclaw/agent-tool-allowlists.json</code> and sync <code>openclaw.json</code>.
+            </p>
+            <div style={{ flex: 1, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, padding: '1rem', background: 'var(--surface)' }}>
+              {toolCatalog.length === 0 ? (
+                <p style={{ color: 'var(--muted)' }}>No content tools registered.</p>
+              ) : (
+                toolCatalog.map((t) => (
+                  <label
+                    key={t.name}
+                    style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start', padding: '0.5rem 0', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={toolGrants.has(t.name)}
+                      onChange={() => toggleTool(t.name)}
+                      style={{ marginTop: 4 }}
+                    />
+                    <span>
+                      <strong>{t.display_name || t.name}</strong>
+                      <code style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: 'var(--muted)' }}>{t.name}</code>
+                      {t.purpose && <div style={{ fontSize: '0.9rem', color: 'var(--muted)', marginTop: 4 }}>{t.purpose}</div>}
+                    </span>
+                  </label>
+                ))
+              )}
+            </div>
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={saveTools}
+                disabled={toolsSaving}
+                style={{
+                  padding: '0.5rem 1.25rem',
+                  background: toolsSaving ? 'var(--muted)' : 'var(--accent)',
+                  border: 'none',
+                  borderRadius: 6,
+                  color: '#fff',
+                }}
+              >
+                {toolsSaving ? 'Saving…' : 'Save tool access'}
+              </button>
+              <button
+                type="button"
+                onClick={syncTemplateMd}
+                disabled={syncingMd}
+                title="Copy TOOLS.md from workspace template (e.g. balserve) into this agent's workspace"
+                style={{
+                  padding: '0.5rem 1.25rem',
+                  background: 'var(--surface)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 6,
+                  color: 'var(--text)',
+                }}
+              >
+                {syncingMd ? 'Syncing…' : 'Sync TOOLS.md from template'}
+              </button>
+            </div>
+          </>
+        ) : loading ? (
           <div>Loading…</div>
         ) : (
           <>

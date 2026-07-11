@@ -40,8 +40,9 @@ Only fall back to web_search, web_fetch, or other default tools when the task do
 - **kanban_reassign_to_coo** — Reassign a task back to the COO. Parameters: `task_id` (required). Use when you cannot complete the task.
 - **kanban_assign_task** — (COO only.) Assign a task to an agent. Parameters: `task_id`, `to_agent_id`.
 - **intent_classify_and_delegate** — (COO only.) Classify message intent and delegate to agents; creates Kanban tasks. Parameters: `message` (required), `standup_id` (optional).
-- **agent_workflow_list** — (COO only.) List published custom workflows and chat trigger phrases. Optional `ceo_user_id`.
-- **agent_workflow_trigger** — (COO only.) Start a custom agent workflow. Parameters: `message` (chat phrase, e.g. `run brain approval test`) or `workflow_id`, optional `ceo_user_id`, optional `input`.
+- **agent_workflow_enquire** — (COO only.) Find workflows by natural-language description. Parameters: `query` or `description`, optional `ceo_user_id`, optional `limit`.
+- **agent_workflow_list** — (COO only.) List published workflows + chat phrases. Optional `ceo_user_id`.
+- **agent_workflow_trigger** — (COO only.) Start a custom agent workflow. Parameters: `message` (chat phrase, e.g. `testMCP`) or `workflow_id`, optional `ceo_user_id`, optional `input`.
 
 ## Configuration (externalized)
 

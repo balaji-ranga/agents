@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { getDb } from '../db/schema.js';
 import * as workspace from '../workspace/adapter.js';
+import { setAgentToolGrants } from './openclaw-agent-tools.js';
 
 const homedir = process.env.USERPROFILE || process.env.HOME || '';
 const OPENCLAW_DIR = join(homedir, '.openclaw');
@@ -210,6 +211,11 @@ ${role || 'Specialist.'}
   ).run(id, name, role, parentId, WORKSPACE_PATH, id, 0);
 
   const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  try {
+    setAgentToolGrants(row, agentEntry.tools.allow);
+  } catch (e) {
+    console.warn('setAgentToolGrants failed for', id, e?.message);
+  }
 
   // Add new agent to COO and parent AGENTS.md so they can delegate by intent
   const coo = db.prepare('SELECT id, workspace_path FROM agents WHERE is_coo = 1').get();
