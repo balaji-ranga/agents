@@ -27,7 +27,7 @@ body {
 }
 .app-nav {
   flex-shrink: 0;
-  width: 200px;
+  width: 220px;
   background: var(--surface);
   border-right: 1px solid var(--border);
   padding: 1rem 0;
@@ -74,6 +74,25 @@ body {
 }
 .nav-link.active {
   color: var(--accent);
+}
+.nav-section {
+  margin-bottom: 0.35rem;
+}
+.nav-section-title {
+  padding: 0.65rem 1rem 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  opacity: 0.9;
+}
+.nav-link-nested {
+  padding-left: 1.35rem;
+  font-size: 0.85rem;
+}
+.app-nav.collapsed .nav-link-nested {
+  padding-left: 0.25rem;
+  font-size: 0.72rem;
 }
 .app-nav.collapsed .nav-link {
   text-align: center;

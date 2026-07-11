@@ -15,6 +15,7 @@ Documentation lives here so Cursor and humans can find it. **Root README.md** st
 | **SESSION-HISTORY-VISIBILITY-TREE.md** | Fix "Session history visibility is restricted to the current session tree" — use injected session key or set `tools.sessions.visibility`. |
 | **JOB-APPLICANT-WORKFLOW.md** | Job Applicant pipeline: four agents, profile intake, tools, Sheets/GDrive/Playwright plan, setup via `scripts/setup-job-applicant-agents.js`. |
 | **DEPLOY-CENTOS-PODMAN.md** | Production deploy on CentOS/RHEL with Podman Compose: SELinux, firewall, volumes, OpenClaw/Chromium, browser login, optional profiles. |
+| **knowledgeGraph.md** | Neo4j knowledge graph for internal OpenClaw agent behavior, Kanban feedback, autonomous self-improvement, and progressive improvement dashboard. |
 
 ## Not in knowledgebase (stay at repo root or other paths)
 

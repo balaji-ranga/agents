@@ -41,7 +41,7 @@ export default function Workspace() {
 
   return (
     <div style={{ padding: '2rem' }}>
-      <h1 style={{ marginTop: 0 }}>Workspace (MD files)</h1>
+      <h1 style={{ marginTop: 0 }}>Agent Workspaces</h1>
       <p style={{ color: 'var(--muted)', marginBottom: '1.5rem' }}>
         MD file view/edit is per agent. Select an agent to open its SOUL.md, AGENTS.md, and MEMORY.md.
       </p>

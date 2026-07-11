@@ -19,6 +19,7 @@ import McpIntegrations from './pages/McpIntegrations';
 import CustomScripts from './pages/CustomScripts';
 import ExternalAgents from './pages/ExternalAgents';
 import NotificationBell from './components/NotificationBell';
+import { AdminNavMenu, CeoNavMenu } from './components/AppNavMenu';
 import { useAuth } from './context/AuthContext';
 
 function Shell() {
@@ -80,37 +81,8 @@ function Shell() {
             <NotificationBell />
           </div>
         )}
-        {user.role === 'admin' && (
-          <>
-            <NavLink to="/admin" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Admin">
-              {navCollapsed ? 'A' : 'Admin'}
-            </NavLink>
-            <NavLink to="/integrations/mcp" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="MCP">
-              {navCollapsed ? 'M' : 'MCP'}
-            </NavLink>
-            <NavLink to="/integrations/custom-scripts" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Custom scripts">
-              {navCollapsed ? 'Py' : 'Custom scripts'}
-            </NavLink>
-            <NavLink to="/integrations/external-agents" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="External agents (A2A)">
-              {navCollapsed ? 'A2A' : 'External agents'}
-            </NavLink>
-          </>
-        )}
-        {user.role === 'ceo' && (
-          <>
-            <NavLink to="/" end className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Dashboard">{navCollapsed ? '⌂' : 'Dashboard'}</NavLink>
-            <NavLink to="/job-profiles" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Job profiles">{navCollapsed ? 'JP' : 'Job profiles'}</NavLink>
-            <NavLink to="/job-workflows" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Job workflows">{navCollapsed ? 'JW' : 'Job workflows'}</NavLink>
-            <NavLink to="/workflows" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Workflows">{navCollapsed ? 'Wf' : 'Workflows'}</NavLink>
-            <NavLink to="/kanban" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Kanban">{navCollapsed ? 'K' : 'Kanban'}</NavLink>
-            <NavLink to="/workspace" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Workspace">{navCollapsed ? 'Ws' : 'Workspace (MD)'}</NavLink>
-            <NavLink to="/content-tools" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Content tools">{navCollapsed ? 'Ct' : 'Content tools'}</NavLink>
-            <NavLink to="/integrations/mcp" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="MCP integrations">{navCollapsed ? 'Mcp' : 'MCP'}</NavLink>
-            <NavLink to="/integrations/custom-scripts" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Custom scripts (LangGraph)">{navCollapsed ? 'Py' : 'Custom scripts'}</NavLink>
-            <NavLink to="/integrations/external-agents" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="External agents (A2A)">{navCollapsed ? 'A2A' : 'External agents'}</NavLink>
-            <NavLink to="/broadcast" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} title="Broadcast">{navCollapsed ? 'Bc' : 'Broadcast'}</NavLink>
-          </>
-        )}
+        {user.role === 'admin' && <AdminNavMenu collapsed={navCollapsed} />}
+        {user.role === 'ceo' && <CeoNavMenu collapsed={navCollapsed} />}
         <button
           type="button"
           onClick={logout}
