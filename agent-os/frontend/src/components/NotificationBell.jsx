@@ -21,6 +21,41 @@ function computePanelPosition(buttonEl) {
   return { top, left, width: PANEL_WIDTH };
 }
 
+function normalizeAgentNotification(n) {
+  return {
+    ...n,
+    kind: 'agent',
+    feedId: `agent-${n.id}`,
+    sortAt: n.completed_at || n.scheduled_at || '',
+  };
+}
+
+function normalizePlatformNotification(n) {
+  return {
+    ...n,
+    kind: 'platform',
+    feedId: `platform-${n.id}`,
+    sortAt: n.created_at || '',
+  };
+}
+
+function NotificationLink({ href, onNavigate, children }) {
+  const url = String(href || '').trim();
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) {
+    return (
+      <a href={url} target="_blank" rel="noreferrer" onClick={onNavigate} style={{ color: 'var(--accent)', fontSize: '0.85rem' }}>
+        {children}
+      </a>
+    );
+  }
+  return (
+    <Link to={url.startsWith('/') ? url : `/${url}`} onClick={onNavigate} style={{ color: 'var(--accent)', fontSize: '0.85rem' }}>
+      {children}
+    </Link>
+  );
+}
+
 export default function NotificationBell() {
   const [notifications, setNotifications] = useState([]);
   const [dismissedIds, setDismissedIds] = useState(() => {
@@ -36,7 +71,7 @@ export default function NotificationBell() {
   const [panelPos, setPanelPos] = useState(null);
   const buttonRef = useRef(null);
 
-  const visible = notifications.filter((n) => !dismissedIds.includes(n.id));
+  const visible = notifications.filter((n) => !dismissedIds.includes(n.feedId));
 
   const persistDismissed = (ids) => {
     const next = Array.isArray(ids) ? ids.slice(-MAX_DISMISSED_IDS) : [];
@@ -47,12 +82,21 @@ export default function NotificationBell() {
   };
 
   const clearAll = () => {
-    const ids = notifications.map((n) => n.id).filter(Boolean);
+    const ids = notifications.map((n) => n.feedId).filter(Boolean);
     if (ids.length > 0) persistDismissed([...dismissedIds, ...ids]);
   };
 
   const fetchNotifications = () => {
-    api.standupNotifications(20).then((data) => setNotifications(data.notifications || [])).catch(() => setNotifications([]));
+    Promise.all([
+      api.standupNotifications(20).catch(() => ({ notifications: [] })),
+      api.platformNotifications(20).catch(() => ({ notifications: [] })),
+    ]).then(([agentRes, platformRes]) => {
+      const merged = [
+        ...(agentRes.notifications || []).map(normalizeAgentNotification),
+        ...(platformRes.notifications || []).map(normalizePlatformNotification),
+      ].sort((a, b) => String(b.sortAt).localeCompare(String(a.sortAt)));
+      setNotifications(merged);
+    });
   };
 
   const updatePanelPosition = useCallback(() => {
@@ -94,19 +138,17 @@ export default function NotificationBell() {
     };
   }, [open, updatePanelPosition]);
 
+  const closePanel = () => setOpen(false);
+
   const panel =
     open && panelPos
       ? createPortal(
           <>
-            <div
-              className="notification-overlay-backdrop"
-              aria-hidden
-              onClick={() => setOpen(false)}
-            />
+            <div className="notification-overlay-backdrop" aria-hidden onClick={closePanel} />
             <div
               className="notification-overlay-panel"
               role="dialog"
-              aria-label="Agent responses"
+              aria-label="Notifications"
               style={{
                 top: panelPos.top,
                 left: panelPos.left,
@@ -116,7 +158,7 @@ export default function NotificationBell() {
               onClick={(e) => e.stopPropagation()}
             >
               <div className="notification-overlay-header">
-                <span>Agent responses</span>
+                <span>Notifications</span>
                 {visible.length > 0 && (
                   <button type="button" onClick={clearAll} className="notification-overlay-clear">
                     Clear
@@ -124,38 +166,59 @@ export default function NotificationBell() {
                 )}
               </div>
               {visible.length === 0 ? (
-                <div className="notification-overlay-empty">No recent responses.</div>
+                <div className="notification-overlay-empty">No notifications.</div>
               ) : (
                 <div className="notification-overlay-list">
                   {visible.slice(0, 15).map((n) => (
-                    <div key={n.id} className="notification-overlay-item">
-                      <div style={{ marginBottom: '0.25rem' }}>
-                        <strong>{n.agent_name || n.to_agent_id}</strong>
-                        {n.is_job_pipeline && (
-                          <span style={{ marginLeft: '0.35rem', fontSize: '0.75rem', color: 'var(--accent)' }}>
-                            Job pipeline
-                          </span>
-                        )}
-                        {' — '}
-                        {n.standup_title || new Date(n.scheduled_at).toLocaleDateString()}
-                      </div>
-                      {n.response_snippet && (
-                        <div className="notification-overlay-snippet">{n.response_snippet}…</div>
+                    <div key={n.feedId} className="notification-overlay-item">
+                      {n.kind === 'platform' ? (
+                        <>
+                          <div style={{ marginBottom: '0.25rem' }}>
+                            <strong>{n.title}</strong>
+                            <span style={{ marginLeft: '0.35rem', fontSize: '0.75rem', color: 'var(--accent)' }}>
+                              Admin
+                            </span>
+                          </div>
+                          {n.body && <div className="notification-overlay-snippet">{n.body}</div>}
+                          {n.link_url && (
+                            <div style={{ marginTop: '0.35rem' }}>
+                              <NotificationLink href={n.link_url} onNavigate={closePanel}>
+                                Open →
+                              </NotificationLink>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <div style={{ marginBottom: '0.25rem' }}>
+                            <strong>{n.agent_name || n.to_agent_id}</strong>
+                            {n.is_job_pipeline && (
+                              <span style={{ marginLeft: '0.35rem', fontSize: '0.75rem', color: 'var(--accent)' }}>
+                                Job pipeline
+                              </span>
+                            )}
+                            {' — '}
+                            {n.standup_title || new Date(n.scheduled_at).toLocaleDateString()}
+                          </div>
+                          {n.response_snippet && (
+                            <div className="notification-overlay-snippet">{n.response_snippet}…</div>
+                          )}
+                          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                            {n.kanban_task_id && (
+                              <Link to="/kanban" onClick={closePanel} style={{ color: 'var(--accent)', fontSize: '0.85rem' }}>
+                                Kanban →
+                              </Link>
+                            )}
+                            <Link
+                              to={`/agents/${encodeURIComponent(n.to_agent_id)}/chat`}
+                              onClick={closePanel}
+                              style={{ color: 'var(--accent)', fontSize: '0.85rem' }}
+                            >
+                              Chat →
+                            </Link>
+                          </div>
+                        </>
                       )}
-                      <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                        {n.kanban_task_id && (
-                          <Link to="/kanban" onClick={() => setOpen(false)} style={{ color: 'var(--accent)', fontSize: '0.85rem' }}>
-                            Kanban →
-                          </Link>
-                        )}
-                        <Link
-                          to={`/agents/${encodeURIComponent(n.to_agent_id)}/chat`}
-                          onClick={() => setOpen(false)}
-                          style={{ color: 'var(--accent)', fontSize: '0.85rem' }}
-                        >
-                          Chat →
-                        </Link>
-                      </div>
                     </div>
                   ))}
                 </div>
@@ -172,7 +235,7 @@ export default function NotificationBell() {
         ref={buttonRef}
         type="button"
         onClick={toggleOpen}
-        title="Agent responses"
+        title="Notifications"
         aria-expanded={open}
         aria-haspopup="dialog"
         style={{

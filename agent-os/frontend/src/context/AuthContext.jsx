@@ -4,13 +4,23 @@ import { api, setAuthToken } from '../api';
 const AuthContext = createContext(null);
 
 const TOKEN_KEY = 'agent-os-auth-token';
+const IMPERSONATOR_TOKEN_KEY = 'agent-os-impersonator-token';
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [agents, setAgents] = useState([]);
   const [dataCeoUserId, setDataCeoUserId] = useState(null);
   const [usesPlatformDb, setUsesPlatformDb] = useState(false);
+  const [impersonation, setImpersonation] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  const applyMe = useCallback((data) => {
+    setUser(data.user);
+    setAgents(data.agents || []);
+    setDataCeoUserId(data.data_ceo_user_id || null);
+    setUsesPlatformDb(!!data.uses_platform_db);
+    setImpersonation(data.impersonation || data.user?.impersonation || null);
+  }, []);
 
   const loadMe = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY);
@@ -19,27 +29,27 @@ export function AuthProvider({ children }) {
       setAgents([]);
       setDataCeoUserId(null);
       setUsesPlatformDb(false);
+      setImpersonation(null);
       setLoading(false);
       return;
     }
     setAuthToken(token);
     try {
       const data = await api.authMe();
-      setUser(data.user);
-      setAgents(data.agents || []);
-      setDataCeoUserId(data.data_ceo_user_id || null);
-      setUsesPlatformDb(!!data.uses_platform_db);
+      applyMe(data);
     } catch {
       localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(IMPERSONATOR_TOKEN_KEY);
       setAuthToken(null);
       setUser(null);
       setAgents([]);
       setDataCeoUserId(null);
       setUsesPlatformDb(false);
+      setImpersonation(null);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyMe]);
 
   useEffect(() => {
     loadMe();
@@ -47,45 +57,100 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password, admin = false) => {
     const data = admin ? await api.authAdminLogin({ email, password }) : await api.authLogin({ email, password });
+    localStorage.removeItem(IMPERSONATOR_TOKEN_KEY);
     localStorage.setItem(TOKEN_KEY, data.session.token);
     setAuthToken(data.session.token);
     setUser(data.user);
     if (data.user.role === 'ceo') {
       const me = await api.authMe();
-      setAgents(me.agents || []);
-      setDataCeoUserId(me.data_ceo_user_id || null);
-      setUsesPlatformDb(!!me.uses_platform_db);
+      applyMe(me);
+    } else {
+      setImpersonation(null);
     }
     return data.user;
   };
 
   const register = async (body) => {
     const data = await api.authRegister(body);
+    localStorage.removeItem(IMPERSONATOR_TOKEN_KEY);
     localStorage.setItem(TOKEN_KEY, data.session.token);
     setAuthToken(data.session.token);
-    setUser(data.user);
-    setAgents([]);
     const me = await api.authMe();
-    setAgents(me.agents || []);
-    setDataCeoUserId(me.data_ceo_user_id || null);
-    setUsesPlatformDb(!!me.uses_platform_db);
+    applyMe(me);
     return data.user;
   };
 
+  const impersonateUser = async (userId) => {
+    const currentToken = localStorage.getItem(TOKEN_KEY);
+    if (!currentToken) throw new Error('Admin session required');
+    const data = await api.adminImpersonateUser(userId);
+    localStorage.setItem(IMPERSONATOR_TOKEN_KEY, currentToken);
+    localStorage.setItem(TOKEN_KEY, data.session.token);
+    setAuthToken(data.session.token);
+    const me = await api.authMe();
+    applyMe(me);
+    return me.user;
+  };
+
+  const exitImpersonation = async () => {
+    try {
+      await api.authExitImpersonation();
+    } catch (_) {
+      /* session may already be invalid */
+    }
+    const adminToken = localStorage.getItem(IMPERSONATOR_TOKEN_KEY);
+    localStorage.removeItem(IMPERSONATOR_TOKEN_KEY);
+    if (adminToken) {
+      localStorage.setItem(TOKEN_KEY, adminToken);
+      setAuthToken(adminToken);
+      setLoading(true);
+      await loadMe();
+      window.location.href = '/admin';
+      return;
+    }
+    localStorage.removeItem(TOKEN_KEY);
+    setAuthToken(null);
+    setUser(null);
+    setAgents([]);
+    setImpersonation(null);
+    window.location.href = '/login';
+  };
+
   const logout = async () => {
+    if (localStorage.getItem(IMPERSONATOR_TOKEN_KEY)) {
+      await exitImpersonation();
+      return;
+    }
     try {
       await api.authLogout();
     } catch (_) {}
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(IMPERSONATOR_TOKEN_KEY);
     setAuthToken(null);
     setUser(null);
     setAgents([]);
     setDataCeoUserId(null);
     setUsesPlatformDb(false);
+    setImpersonation(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, agents, dataCeoUserId, usesPlatformDb, loading, login, register, logout, reload: loadMe }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        agents,
+        dataCeoUserId,
+        usesPlatformDb,
+        impersonation,
+        loading,
+        login,
+        register,
+        logout,
+        impersonateUser,
+        exitImpersonation,
+        reload: loadMe,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

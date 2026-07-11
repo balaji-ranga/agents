@@ -1,9 +1,17 @@
 import { Router } from 'express';
 import { join } from 'path';
-import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
+import { existsSync, rmSync, writeFileSync, readFileSync } from 'fs';
 import { getDb } from '../db/schema.js';
-import { attachAuthUser, resolveAuthenticatedCeoUserId, resolveCeoDataUserIdFromRequest } from '../middleware/auth.js';
+import { requireAuth, resolveAuthenticatedCeoUserId, resolveCeoDataUserIdFromRequest } from '../middleware/auth.js';
 import { listAgentsForUser } from '../services/users.js';
+import {
+  assertUserAgentAccess,
+  chatOwnerIdsForRead,
+  clearOpenClawSessionForUser,
+  extractOwnerUserIdFromText,
+  resolveChatOwnerUserId,
+} from '../services/agent-chat-scope.js';
+import { registerOpenClawSessionOwner } from '../services/tool-owner-scope.js';
 import * as openclaw from '../gateway/openclaw.js';
 import { tryTriggerWorkflowFromChat } from '../services/agent-workflow-runner.js';
 import * as workspace from '../workspace/adapter.js';
@@ -58,25 +66,25 @@ function getAgentWorkspaceRoot(agent) {
   return path;
 }
 
-router.get('/', attachAuthUser, (req, res) => {
+router.get('/', requireAuth, (req, res) => {
   try {
-    if (req.authUser?.role === 'ceo') {
-      return res.json(listAgentsForUser(req.authUser.id));
+    if (req.authUser.role === 'admin' && !req.authUser.impersonation) {
+      return res.json([]);
     }
-    const rows = db().prepare('SELECT * FROM agents ORDER BY created_at').all();
-    res.json(rows);
+    return res.json(listAgentsForUser(req.authUser.id));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-router.get('/:id', (req, res) => {
+router.get('/:id', requireAuth, (req, res) => {
   try {
+    assertUserAgentAccess(req.authUser, req.params.id);
     const row = db().prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id);
     if (!row) return res.status(404).json({ error: 'Agent not found' });
     res.json(row);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -163,21 +171,21 @@ router.put('/:id/workspace/files/:name', async (req, res) => {
   }
 });
 
-// POST /api/agents/:id/sessions/clear — clear OpenClaw sessions for this agent (deletes ~/.openclaw/agents/<id>/sessions)
-router.post('/:id/sessions/clear', (req, res) => {
+// POST /api/agents/:id/sessions/clear — clear this user's OpenClaw session + chat history for the agent
+router.post('/:id/sessions/clear', requireAuth, (req, res) => {
   try {
+    const ownerUserId = resolveChatOwnerUserId(req, req.body || {});
+    assertUserAgentAccess(req.authUser, req.params.id);
     const agent = db().prepare('SELECT id, openclaw_agent_id FROM agents WHERE id = ?').get(req.params.id);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
     const openclawId = (agent.openclaw_agent_id || agent.id || '').toString().trim() || 'main';
-    const sessionsDir = join(homedir, '.openclaw', 'agents', openclawId, 'sessions');
-    if (existsSync(sessionsDir)) {
-      rmSync(sessionsDir, { recursive: true });
-    }
-    mkdirSync(sessionsDir, { recursive: true });
-    writeFileSync(join(sessionsDir, 'sessions.json'), '{}', 'utf8');
-    res.json({ ok: true, message: `Sessions cleared for agent ${req.params.id}` });
+    clearOpenClawSessionForUser(agent.id, openclawId, ownerUserId);
+    db()
+      .prepare('DELETE FROM chat_turns WHERE agent_id = ? AND owner_user_id = ?')
+      .run(agent.id, ownerUserId);
+    res.json({ ok: true, message: `Your session cleared for agent ${req.params.id}` });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -245,21 +253,32 @@ router.delete('/:id', (req, res) => {
   }
 });
 
-// Chat: get recent turns for an agent
-router.get('/:id/chat', attachAuthUser, (req, res) => {
+// Chat: get recent turns for an agent (scoped to signed-in user)
+router.get('/:id/chat', requireAuth, (req, res) => {
   try {
-    const turns = db().prepare('SELECT id, role, content, created_at FROM chat_turns WHERE agent_id = ? ORDER BY created_at')
-      .all(req.params.id);
+    const ownerUserId = resolveChatOwnerUserId(req, req.query || {});
+    assertUserAgentAccess(req.authUser, req.params.id);
+    const ownerIds = chatOwnerIdsForRead(ownerUserId);
+    const placeholders = ownerIds.map(() => '?').join(',');
+    const turns = db()
+      .prepare(
+        `SELECT id, role, content, created_at FROM chat_turns
+         WHERE agent_id = ? AND owner_user_id IN (${placeholders})
+         ORDER BY created_at`
+      )
+      .all(req.params.id, ...ownerIds);
     res.json(turns);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
 // Chat: send message and get reply (OpenClaw gateway)
-router.post('/:id/chat', attachAuthUser, async (req, res) => {
+router.post('/:id/chat', requireAuth, async (req, res) => {
   try {
     const agentId = req.params.id;
+    const ownerUserId = resolveChatOwnerUserId(req, req.body || {});
+    assertUserAgentAccess(req.authUser, agentId);
     const agent = db().prepare('SELECT * FROM agents WHERE id = ?').get(agentId);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
@@ -284,14 +303,23 @@ router.post('/:id/chat', attachAuthUser, async (req, res) => {
     const profileId = req.body?.profile_id || req.body?.profileId || null;
     const openclawAgentId = agent.openclaw_agent_id || 'main';
 
-    // Load recent history from DB for context (last N turns)
-    const history = db().prepare('SELECT role, content FROM chat_turns WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20')
-      .all(agentId)
+    // Load recent history from DB for context (last N turns, scoped to this user)
+    const ownerIds = chatOwnerIdsForRead(ownerUserId);
+    const ownerPlaceholders = ownerIds.map(() => '?').join(',');
+    const history = db()
+      .prepare(
+        `SELECT role, content FROM chat_turns
+         WHERE agent_id = ? AND owner_user_id IN (${ownerPlaceholders})
+         ORDER BY created_at DESC LIMIT 20`
+      )
+      .all(agentId, ...ownerIds)
       .reverse();
     const messages = history.map((t) => ({ role: t.role, content: t.content }));
     const jobApplicantAgents = new Set(['jobdiscovery', 'fitscorer', 'resumetailor', 'applicationagent']);
     let userContent = message;
-    if (jobApplicantAgents.has(String(agentId).toLowerCase()) && !message.includes('[ceo_user_id:')) {
+    if (agent.is_coo && !message.includes('[ceo_user_id:')) {
+      userContent = `[ceo_user_id: ${ownerUserId}]\n[owner_user_id: ${ownerUserId}]\nImportant: You are assisting CEO user id "${ownerUserId}" only. When calling agent_workflow_list or agent_workflow_enquire, return workflows for this CEO only — never workflows belonging to other users.\n${message}`;
+    } else if (jobApplicantAgents.has(String(agentId).toLowerCase()) && !message.includes('[ceo_user_id:')) {
       const tags = [`[ceo_user_id: ${userId}]`];
       if (profileId) tags.push(`[profile_id: ${profileId}]`);
       userContent = `${tags.join('\n')}\n${message}`;
@@ -322,7 +350,9 @@ router.post('/:id/chat', attachAuthUser, async (req, res) => {
       }
     }
 
-    const sessionUser = 'main';
+    const sessionUser = openclaw.sessionUserFor(agentId, ownerUserId);
+    const sessionKey = openclaw.sessionKeyFor(openclawAgentId, sessionUser);
+    registerOpenClawSessionOwner(sessionKey, ownerUserId);
     const isDiscovery = String(agentId).toLowerCase() === 'jobdiscovery';
     const discoveryTimeout = Number(process.env.OPENCLAW_DISCOVERY_TIMEOUT_MS || 900000);
     const { content: reply, usage } = await openclaw.chatCompletions(
@@ -335,8 +365,12 @@ router.post('/:id/chat', attachAuthUser, async (req, res) => {
     const replyText = normalizeReplyContent(reply);
 
     // Persist user message and assistant reply (same normalized string shape as standup chat)
-    db().prepare('INSERT INTO chat_turns (agent_id, role, content) VALUES (?, ?, ?)').run(agentId, 'user', message);
-    db().prepare('INSERT INTO chat_turns (agent_id, role, content) VALUES (?, ?, ?)').run(agentId, 'assistant', replyText);
+    db()
+      .prepare('INSERT INTO chat_turns (agent_id, owner_user_id, role, content) VALUES (?, ?, ?, ?)')
+      .run(agentId, ownerUserId, 'user', message);
+    db()
+      .prepare('INSERT INTO chat_turns (agent_id, owner_user_id, role, content) VALUES (?, ?, ?, ?)')
+      .run(agentId, ownerUserId, 'assistant', replyText);
 
     res.json({
       reply: replyText,
@@ -352,11 +386,11 @@ router.post('/:id/chat', attachAuthUser, async (req, res) => {
         : null,
     });
   } catch (e) {
-    res.status(502).json({ error: e.message });
+    res.status(e.status || 502).json({ error: e.message });
   }
 });
 
-// Chat from another agent (e.g. COO messages TechResearcher). Body: { from_agent_id, message }
+// Chat from another agent
 router.post('/:id/chat/from-agent', async (req, res) => {
   try {
     const agentId = req.params.id;
@@ -371,21 +405,35 @@ router.post('/:id/chat/from-agent', async (req, res) => {
     if (!fromAgent) return res.status(404).json({ error: 'From agent not found' });
 
     const userContent = `From ${fromAgent.name} (${fromAgent.role}): ${message.trim()}`;
-    const userId = req.body?.user_id || req.headers['x-user-id'] || 'agent-os-internal';
+    const ownerUserId =
+      req.body?.owner_user_id ||
+      req.body?.ceo_user_id ||
+      extractOwnerUserIdFromText(message);
     const openclawAgentId = agent.openclaw_agent_id || 'main';
 
-    const history = db().prepare('SELECT role, content FROM chat_turns WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20')
-      .all(agentId)
+    const ownerIds = chatOwnerIdsForRead(ownerUserId);
+    const ownerPlaceholders = ownerIds.map(() => '?').join(',');
+    const history = db()
+      .prepare(
+        `SELECT role, content FROM chat_turns
+         WHERE agent_id = ? AND owner_user_id IN (${ownerPlaceholders})
+         ORDER BY created_at DESC LIMIT 20`
+      )
+      .all(agentId, ...ownerIds)
       .reverse();
     const messages = history.map((t) => ({ role: t.role, content: t.content }));
     messages.push({ role: 'user', content: userContent });
 
-    const sessionUser = 'main';
+    const sessionUser = openclaw.sessionUserFor(agentId, ownerUserId);
     const { content: reply, usage } = await openclaw.chatCompletions(openclawAgentId, messages, sessionUser, false);
     const replyText = normalizeReplyContent(reply);
 
-    db().prepare('INSERT INTO chat_turns (agent_id, role, content) VALUES (?, ?, ?)').run(agentId, 'user', userContent);
-    db().prepare('INSERT INTO chat_turns (agent_id, role, content) VALUES (?, ?, ?)').run(agentId, 'assistant', replyText);
+    db()
+      .prepare('INSERT INTO chat_turns (agent_id, owner_user_id, role, content) VALUES (?, ?, ?, ?)')
+      .run(agentId, ownerUserId, 'user', userContent);
+    db()
+      .prepare('INSERT INTO chat_turns (agent_id, owner_user_id, role, content) VALUES (?, ?, ?, ?)')
+      .run(agentId, ownerUserId, 'assistant', replyText);
 
     res.json({ reply, usage, agent_id: agentId, from_agent_id: fromAgentId });
   } catch (e) {

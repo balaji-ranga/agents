@@ -43,10 +43,13 @@ Workflow lifecycle (definition level):
 - publish: copies draft_graph to published_graph and sets status=published.
 
 Run instance level (separate from definition status):
+- list_runs: recent run instances for a workflow (AUTHORITATIVE run numbers — never guess).
 - trigger_workflow / test_workflow: start a new run.
 - pause_run / stop_run: pause or delete a specific run.
 - pause_all_runs: pause all active runs (optionally for one workflow).
-- inspect_run: step-level status and errors for debugging.
+- inspect_run: step-level status and errors for debugging (use run_number from list_runs or context).
+
+For "latest failed run" / "why did X fail" questions: call list_runs then inspect_run on the failed run_number from DB — never invent run ids or numbers.
 
 To edit graph on a published workflow: either unpublish first OR edit draft_graph directly (save via update_node); re-publish when ready.
 
@@ -80,7 +83,7 @@ export function buildAgentActionsDoc() {
     'set_metadata', 'publish', 'unpublish', 'revert_to_draft',
     'open_workflow', 'load_workflow', 'reload_workflow',
     'pause_workflow', 'resume_workflow',
-    'trigger_workflow', 'test_workflow', 'inspect_run',
+    'trigger_workflow', 'test_workflow', 'list_runs', 'inspect_run',
     'pause_run', 'stop_run', 'cancel_run', 'delete_run', 'pause_all_runs', 'stop_listen',
     'delete_workflow',
   ];

@@ -7,6 +7,7 @@ import { readFile, appendFile } from 'fs/promises';
 import { join } from 'path';
 import { getDb } from '../db/schema.js';
 import * as openclaw from '../gateway/openclaw.js';
+import { extractOwnerUserIdFromText } from './agent-chat-scope.js';
 import { cronAddOneShotWebhook } from '../gateway/openclaw-cron.js';
 import { classifyIntentAndAllocate } from './intent-classifier.js';
 import {
@@ -162,14 +163,18 @@ export function extractTaskSummaryFromPrompt(prompt) {
 /**
  * Append delegation task request and response to agent's chat_turns so Agent Chat page shows it.
  */
-export function appendDelegationResponseToAgentChat(agentId, promptSnippet, responseContent) {
+export function appendDelegationResponseToAgentChat(agentId, promptSnippet, responseContent, ownerUserId = null) {
   if (!agentId || responseContent == null) return;
   const db = getDb();
+  const owner =
+    ownerUserId ||
+    extractOwnerUserIdFromText(promptSnippet) ||
+    extractOwnerUserIdFromText(typeof responseContent === 'string' ? responseContent : '');
   const userMsg = (promptSnippet || 'Task from COO').trim().slice(0, 4000);
   const assistantMsg = (typeof responseContent === 'string' ? responseContent : JSON.stringify(responseContent)).trim().slice(0, 100000);
   try {
-    db.prepare('INSERT INTO chat_turns (agent_id, role, content) VALUES (?, ?, ?)').run(agentId, 'user', userMsg);
-    db.prepare('INSERT INTO chat_turns (agent_id, role, content) VALUES (?, ?, ?)').run(agentId, 'assistant', assistantMsg);
+    db.prepare('INSERT INTO chat_turns (agent_id, owner_user_id, role, content) VALUES (?, ?, ?, ?)').run(agentId, owner, 'user', userMsg);
+    db.prepare('INSERT INTO chat_turns (agent_id, owner_user_id, role, content) VALUES (?, ?, ?, ?)').run(agentId, owner, 'assistant', assistantMsg);
   } catch (_) {}
 }
 
@@ -514,7 +519,8 @@ export async function processPendingDelegationTasks() {
         isAgentWorkflowPrompt(task.prompt)
           ? extractTaskContentFromPrompt(task.prompt)
           : extractTaskSummaryFromPrompt(task.prompt),
-        responseText
+        responseText,
+        extractOwnerUserIdFromText(task.prompt)
       );
       const summary = extractTaskSummaryFromPrompt(task.prompt);
       await appendToAgentMemory(task.to_agent_id, summary);

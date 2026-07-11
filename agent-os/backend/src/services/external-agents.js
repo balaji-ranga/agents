@@ -71,11 +71,19 @@ function buildAuthHeaders(row) {
   return headers;
 }
 
+function isPlatformAdmin(authUser) {
+  return authUser?.role === 'admin' && !authUser?.impersonation;
+}
+
 export function listExternalAgents(authUser, { forWorkflow = false } = {}) {
   const db = getDb();
   let rows;
-  if (authUser.role === 'admin') {
-    rows = db.prepare('SELECT * FROM external_agents ORDER BY is_platform DESC, name ASC').all();
+  if (isPlatformAdmin(authUser)) {
+    rows = db
+      .prepare(
+        `SELECT * FROM external_agents WHERE is_platform = 1 AND owner_role = 'admin' ORDER BY name ASC`
+      )
+      .all();
   } else {
     rows = db
       .prepare(

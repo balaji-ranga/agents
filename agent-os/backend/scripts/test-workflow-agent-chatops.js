@@ -15,6 +15,7 @@ import { getBalaCeoAuthId } from '../src/services/job-applicant-ceo.js';
 import * as store from '../src/services/agent-workflow-store.js';
 import { applyWorkflowBuilderActions } from '../src/services/agent-workflow-builder.js';
 import { runWorkflowBuilderChat } from '../src/services/agent-workflow-agent.js';
+import { parseFailedRunQueryIntent } from '../src/services/agent-workflow-agent-runs.js';
 import { parseWorkflowAgentCommand } from '../src/services/agent-workflow-chat-tools.js';
 import { matchWorkflowRecipe } from '../src/services/agent-workflow-recipes.js';
 
@@ -197,6 +198,11 @@ const chatListUnpub = await runWorkflowBuilderChat({
 def = store.getDefinition(wfId, owner);
 assert(def?.status === 'draft', 'list-page status phrase reverts to draft');
 assert(chatListUnpub.actions_applied?.some((a) => a.action === 'unpublish'), 'list-page phrase applied unpublish');
+
+// 9a. Failed run query intent (no LLM hallucination)
+const failedMsg = 'what is the recent failed run of testMCP and why it failed';
+const failedIntent = parseFailedRunQueryIntent(failedMsg);
+assert(failedIntent?.workflow_query?.toLowerCase() === 'testmcp', 'parses testMCP from failed run query');
 
 // 9. inspect_run on empty (may fail if no runs — skip trigger if brain needs API)
 try {

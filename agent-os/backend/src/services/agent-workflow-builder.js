@@ -292,13 +292,44 @@ export async function applyWorkflowBuilderActions(ownerUserId, workflowId, actio
     }
 
     if (op === 'inspect_run') {
+      let targetWorkflowId = action.workflow_id || action.definition_id || currentId;
+      if (!targetWorkflowId && (action.workflow_name || action.name)) {
+        const target = resolveWorkflowForTrigger(ownerUserId, {
+          workflow_name: action.workflow_name || action.name,
+        });
+        if (target) targetWorkflowId = target.id;
+      }
       const run = resolveRunForOwner(ownerUserId, {
         run_id: action.run_id,
         run_number: action.run_number,
-        workflow_id: action.workflow_id || action.definition_id || currentId,
+        workflow_id: targetWorkflowId,
+        workflow_name: action.workflow_name || action.name,
+        latest_failed: action.latest_failed,
       });
       if (!run) throw new Error('Run not found');
       results.push({ action: op, ok: true, run: summarizeRunForAgent(run) });
+      continue;
+    }
+
+    if (op === 'list_runs') {
+      const target = resolveWorkflowForTrigger(ownerUserId, {
+        workflow_id: action.workflow_id || action.definition_id || currentId,
+        workflow_name: action.workflow_name || action.name,
+      });
+      if (!target) throw new Error('Workflow not found for list_runs');
+      const limit = Math.min(Number(action.limit) || 20, 50);
+      const runs = store.listRuns(target.id, ownerUserId, limit).map((r) => ({
+        run_id: r.id,
+        run_number: r.run_number,
+        status: r.status,
+        progress_pct: r.progress_pct,
+        error_message: r.error_message || null,
+        started_at: r.started_at,
+        completed_at: r.completed_at,
+      }));
+      currentId = target.id;
+      def = store.getDefinition(currentId, ownerUserId);
+      results.push({ action: op, ok: true, workflow_id: target.id, runs });
       continue;
     }
 

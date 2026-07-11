@@ -47,6 +47,12 @@ import {
   formatWorkflowDescriptionBlock,
   tryDescribeWorkflowResponse,
 } from './agent-workflow-agent-describe.js';
+import {
+  formatRunFailureReply,
+  formatRunContextBlock,
+  tryFailedRunQueryResponse,
+  tryListRunsQueryResponse,
+} from './agent-workflow-agent-runs.js';
 import { tryCatalogQueryResponse, formatCatalogForPrompt } from './agent-workflow-builder-catalog.js';
 
 
@@ -100,9 +106,11 @@ Respond with a single JSON object (no markdown fences):
 
 ## Runs
 
+- list_runs — { "action": "list_runs", "workflow_id": "...", "limit": 20 } — recent run instances (AUTHORITATIVE run numbers)
 - trigger_workflow, test_workflow (run + wait + diagnostics), inspect_run, pause_run, stop_run, pause_all_runs, stop_listen
-
 - delete_workflow
+
+NEVER invent run numbers or run ids. For failed-run questions: use list_runs or inspect_run with run_number from Recent runs context, or inspect_run with latest_failed on the named workflow.
 
 
 
@@ -237,6 +245,9 @@ function buildUserContext({ workflowId, ownerUserId, message }) {
     );
     for (const def of referenced) {
       parts.push(formatWorkflowDescriptionBlock(def));
+      const runs = store.listRuns(def.id, ownerUserId, 10);
+      const runBlock = formatRunContextBlock(def, runs);
+      if (runBlock) parts.push(runBlock);
     }
   }
 
@@ -388,6 +399,14 @@ function formatAssistantReply(baseReply, result) {
 
   const testResult = applied.find((a) => a.action === 'test_workflow' && a.run);
 
+  const inspectResult = applied.find((a) => a.action === 'inspect_run' && a.run);
+  if (inspectResult?.run) {
+    text += `\n\n${formatRunFailureReply(
+      { name: inspectResult.run.definition_name || 'Workflow' },
+      inspectResult.run
+    )}`;
+  }
+
   if (testResult?.run) {
 
     text += `\n\n**Test:** ${testResult.run.status}`;
@@ -500,6 +519,8 @@ async function executeFastPathCommand(ownerUserId, workflowId, command, actor) {
 
     run_number: command.run_number,
 
+    latest_failed: command.latest_failed,
+
     input: command.input,
 
   };
@@ -552,7 +573,13 @@ async function executeFastPathCommand(ownerUserId, workflowId, command, actor) {
 
       const insp = result.results?.find((r) => r.action === 'inspect_run');
 
-      return insp?.run ? `Run #${insp.run.run_number}: ${insp.run.status}` : 'Inspected.';
+      if (insp?.run) {
+        return formatRunFailureReply(
+          { name: insp.run.definition_name || workflow?.name || 'Workflow' },
+          insp.run
+        );
+      }
+      return 'Run not found.';
 
     },
 
@@ -695,6 +722,50 @@ export async function runWorkflowBuilderChat({
       }),
       reply: assistantText,
       thread_workflow_id: workflowChatThreadKey(workflowId),
+    };
+  }
+
+  const failedRunResult = await tryFailedRunQueryResponse(ownerUserId, workflowId, trimmed);
+  if (failedRunResult) {
+    const assistantText = formatAssistantReply(failedRunResult.reply, {
+      actions_applied: failedRunResult.actions_applied || [],
+    });
+    if (persist) {
+      appendWorkflowChatExchange(ownerUserId, failedRunResult.workflow_id || workflowId, trimmed, assistantText);
+    }
+    return {
+      ...buildChatResultPayload({
+        reply: failedRunResult.reply,
+        modelUsed: null,
+        effectiveWorkflowId: failedRunResult.workflow_id || workflowId,
+        workflow: failedRunResult.workflow || null,
+        result: { results: failedRunResult.actions_applied || [] },
+        workflowTriggered: null,
+      }),
+      reply: assistantText,
+      thread_workflow_id: workflowChatThreadKey(failedRunResult.workflow_id || workflowId),
+    };
+  }
+
+  const listRunsResult = await tryListRunsQueryResponse(ownerUserId, workflowId, trimmed);
+  if (listRunsResult) {
+    const assistantText = formatAssistantReply(listRunsResult.reply, {
+      actions_applied: listRunsResult.actions_applied || [],
+    });
+    if (persist) {
+      appendWorkflowChatExchange(ownerUserId, listRunsResult.workflow_id || workflowId, trimmed, assistantText);
+    }
+    return {
+      ...buildChatResultPayload({
+        reply: listRunsResult.reply,
+        modelUsed: null,
+        effectiveWorkflowId: listRunsResult.workflow_id || workflowId,
+        workflow: listRunsResult.workflow || null,
+        result: { results: listRunsResult.actions_applied || [] },
+        workflowTriggered: null,
+      }),
+      reply: assistantText,
+      thread_workflow_id: workflowChatThreadKey(listRunsResult.workflow_id || workflowId),
     };
   }
 

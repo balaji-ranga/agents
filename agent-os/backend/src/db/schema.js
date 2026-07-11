@@ -697,6 +697,54 @@ export function initDb() {
     _db.exec(`CREATE INDEX IF NOT EXISTS idx_custom_scripts_status ON custom_scripts(status, scan_status)`);
   } catch (_) {}
 
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS platform_user_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT DEFAULT '',
+        link_url TEXT,
+        created_by TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (user_id) REFERENCES platform_users(id)
+      )
+    `);
+    _db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_platform_user_notifications_user ON platform_user_notifications(user_id, created_at DESC)`
+    );
+  } catch (_) {}
+
+  try {
+    _db.exec(`ALTER TABLE platform_sessions ADD COLUMN impersonator_user_id TEXT`);
+  } catch (_) {}
+
+  try {
+    _db.exec(`ALTER TABLE chat_turns ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'default'`);
+  } catch (_) {}
+  try {
+    _db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_chat_turns_agent_owner ON chat_turns(agent_id, owner_user_id)`
+    );
+  } catch (_) {}
+  try {
+    const legacyOwner = (process.env.AGENT_OS_BALA_CEO_ID || 'ceo-bala').trim() || 'ceo-bala';
+    _db.prepare(`UPDATE chat_turns SET owner_user_id = ? WHERE owner_user_id = 'default'`).run(legacyOwner);
+  } catch (_) {}
+
+  try {
+    _db.exec(`ALTER TABLE content_tool_logs ADD COLUMN owner_user_id TEXT`);
+  } catch (_) {}
+  try {
+    _db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_content_tool_logs_owner ON content_tool_logs(owner_user_id, created_at DESC)`
+    );
+  } catch (_) {}
+  try {
+    const legacyOwner = (process.env.AGENT_OS_BALA_CEO_ID || 'ceo-bala').trim() || 'ceo-bala';
+    _db.prepare(`UPDATE content_tool_logs SET owner_user_id = ? WHERE owner_user_id IS NULL`).run(legacyOwner);
+  } catch (_) {}
+
   return _db;
 }
 

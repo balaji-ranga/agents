@@ -20,6 +20,7 @@ import CustomScripts from './pages/CustomScripts';
 import ExternalAgents from './pages/ExternalAgents';
 import NotificationBell from './components/NotificationBell';
 import { AdminNavMenu, CeoNavMenu } from './components/AppNavMenu';
+import ImpersonationBanner from './components/ImpersonationBanner';
 import { useAuth } from './context/AuthContext';
 
 function Shell() {
@@ -93,6 +94,7 @@ function Shell() {
         </button>
       </nav>
       <main className="app-main">
+        <ImpersonationBanner />
         <Routes>
           {user.role === 'admin' && (
             <>

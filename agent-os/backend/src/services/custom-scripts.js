@@ -83,11 +83,19 @@ function deriveStatusFromScan(scan) {
   return { scan_status: 'approved', status: 'approved', risk_level: scan.risk_level || 'low' };
 }
 
+function isPlatformAdmin(authUser) {
+  return authUser?.role === 'admin' && !authUser?.impersonation;
+}
+
 export function listCustomScripts(authUser, { forWorkflow = false } = {}) {
   const db = getDb();
   let rows;
-  if (authUser.role === 'admin') {
-    rows = db.prepare('SELECT * FROM custom_scripts ORDER BY is_platform DESC, name ASC').all();
+  if (isPlatformAdmin(authUser)) {
+    rows = db
+      .prepare(
+        `SELECT * FROM custom_scripts WHERE is_platform = 1 AND owner_role = 'admin' ORDER BY name ASC`
+      )
+      .all();
   } else {
     rows = db
       .prepare(

@@ -2,17 +2,12 @@
  * Chat-triggerable agent workflows — list/trigger helpers for COO tools and CEO chat.
  */
 import { getDb } from '../db/schema.js';
-import { getBalaCeoAuthId } from './job-applicant-ceo.js';
 import * as store from './agent-workflow-store.js';
 import { tryTriggerWorkflowFromChat, startAgentWorkflowRun } from './agent-workflow-runner.js';
+import { resolveToolOwnerUserId, bodyWithoutSpoofedOwner } from './tool-owner-scope.js';
 
 export function resolveWorkflowOwnerUserId(req, body = {}, resolveAuthenticatedCeoUserId) {
-  const explicit = body?.ceo_user_id ?? body?.ceoUserId ?? body?.owner_user_id;
-  if (explicit) return String(explicit).trim();
-  if (req?.authUser && resolveAuthenticatedCeoUserId) {
-    return resolveAuthenticatedCeoUserId(req, body);
-  }
-  return getBalaCeoAuthId();
+  return resolveToolOwnerUserId(req, bodyWithoutSpoofedOwner(body), resolveAuthenticatedCeoUserId);
 }
 
 export function listChatTriggerableWorkflows(ownerUserId) {
@@ -166,16 +161,48 @@ export function parseRunWorkflowIntent(message) {
   return m ? m[1].trim() : null;
 }
 
+export function findLatestFailedRun(ownerUserId, { workflow_id, workflow_name, workflow_query, limit = 50 } = {}) {
+  const query = workflow_name || workflow_query;
+  let def = null;
+  if (workflow_id) {
+    def = store.getDefinition(workflow_id, ownerUserId);
+  }
+  if (!def && query) {
+    def = resolveWorkflowForTrigger(ownerUserId, {
+      workflow_id: query,
+      workflow_name: query,
+      message: query,
+    });
+  }
+  if (!def) return { def: null, run: null, runs: [] };
+
+  const runs = store.listRuns(def.id, ownerUserId, limit);
+  const failed = runs.find((r) => r.status === 'failed');
+  if (!failed) return { def, run: null, runs };
+
+  const full = store.getRun(failed.id, ownerUserId);
+  return { def, run: full, runs };
+}
+
 /** Resolve a run by numeric id or run_number within a workflow. */
 export function resolveRunForOwner(
   ownerUserId,
-  { run_id, runId, run_number, runNumber, workflow_id, workflowId, definition_id } = {}
+  { run_id, runId, run_number, runNumber, workflow_id, workflowId, definition_id, workflow_name, latest_failed } = {}
 ) {
   const explicitId = Number(run_id ?? runId);
   if (explicitId) return store.getRun(explicitId, ownerUserId);
 
-  const defId = String(workflow_id || workflowId || definition_id || '').trim();
+  let defId = String(workflow_id || workflowId || definition_id || '').trim();
   const num = Number(run_number ?? runNumber);
+
+  if (latest_failed) {
+    const { run } = findLatestFailedRun(ownerUserId, {
+      workflow_id: defId || undefined,
+      workflow_name,
+    });
+    return run || null;
+  }
+
   if (defId && num) {
     const row = getDb()
       .prepare(
@@ -300,6 +327,23 @@ export function parseWorkflowAgentCommand(message, { workflowId = null } = {}) {
   const statusIntent = parseStatusChangeIntent(t, workflowId);
   if (statusIntent) return statusIntent;
 
+  if (
+    /(?:recent|latest|last|most recent)\s+failed\s+run/i.test(t) ||
+    /failed\s+run\s+of/i.test(t) ||
+    /(?:why|how)\s+(?:did|does|was)\s+.+\s+fail/i.test(t)
+  ) {
+    const nameMatch =
+      t.match(/(?:failed\s+run\s+of|failure\s+of)\s+(?:the\s+)?(?:workflow\s+)?[`"']?([a-zA-Z0-9_-]+)[`"']?/i) ||
+      t.match(/`([^`]+)`/);
+    const workflow_name = nameMatch?.[1]?.trim();
+    return {
+      cmd: 'inspect_run',
+      workflow_name: workflow_name || undefined,
+      workflow_id: workflowId || undefined,
+      latest_failed: true,
+    };
+  }
+
   const runTarget = parseRunWorkflowIntent(t);
   if (runTarget) return { cmd: 'trigger_workflow', workflow_name: runTarget, workflow_id: workflowId };
 
@@ -330,6 +374,16 @@ export function parseWorkflowAgentCommand(message, { workflowId = null } = {}) {
 
   m = t.match(/^(?:inspect|status|show|check)\s+run\s+#?(\d+)\s*$/i);
   if (m) return { cmd: 'inspect_run', run_number: Number(m[1]), workflow_id: workflowId };
+
+  m = t.match(/^(?:inspect|status)\s+(?:latest|last)\s+failed\s+run(?:\s+(?:of|for)\s+["']?(.+?)["']?)?\s*$/i);
+  if (m) {
+    return {
+      cmd: 'inspect_run',
+      workflow_name: m[1]?.trim() || undefined,
+      workflow_id: workflowId,
+      latest_failed: true,
+    };
+  }
 
   m = t.match(/^(?:inspect|status)\s+(?:latest|last)\s+run\s*$/i);
   if (m) return { cmd: 'inspect_run', workflow_id: workflowId };

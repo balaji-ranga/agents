@@ -1,13 +1,16 @@
 import { Router } from 'express';
 import { getDb } from '../db/schema.js';
+import { requireAuth } from '../middleware/auth.js';
+import { resolveChatOwnerUserId } from '../services/agent-chat-scope.js';
+import { listAgentResponseNotificationsForUser } from '../services/agent-response-notifications.js';
 import { runCooSummarization } from '../services/coo.js';
 import * as openclaw from '../gateway/openclaw.js';
 import { scheduleCeoRequestViaOpenClawCron, enqueueGetWorkFromTeam, enqueueDelegationTask, postCallbackForRequestId, appendToAgentMemory, extractTaskSummaryFromPrompt, extractTaskContentFromPrompt, appendDelegationResponseToAgentChat } from '../services/delegation-queue.js';
 import { isAgentWorkflowPrompt } from '../services/agent-workflow-kanban.js';
+import { extractOwnerUserIdFromText } from '../services/agent-chat-scope.js';
 import { getLastIntentDebug } from '../services/intent-classifier.js';
 
 const router = Router();
-const STANDUP_CHAT_SESSION = 'agent-os-standup-ceo';
 
 function db() {
   return getDb();
@@ -70,7 +73,8 @@ router.post('/cron-callback', (req, res) => {
       isAgentWorkflowPrompt(task.prompt)
         ? extractTaskContentFromPrompt(task.prompt)
         : extractTaskSummaryFromPrompt(task.prompt),
-      responseContent
+      responseContent,
+      extractOwnerUserIdFromText(task.prompt)
     );
     const summary = extractTaskSummaryFromPrompt(task.prompt);
     appendToAgentMemory(agent_id, summary).catch(() => {});
@@ -81,38 +85,11 @@ router.post('/cron-callback', (req, res) => {
   }
 });
 
-// Notifications: recent completed delegation tasks (agent responded). For bell icon and Kanban/Chat links.
-router.get('/notifications', (req, res) => {
+// Notifications: recent completed delegation tasks for the signed-in user's agents.
+router.get('/notifications', requireAuth, (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 20, 50);
-    const rows = db()
-      .prepare(
-        `SELECT t.id, t.standup_id, t.to_agent_id, t.prompt, t.response_content, t.completed_at, t.request_id,
-         s.scheduled_at, s.title, s.source AS standup_source,
-         a.name AS agent_name,
-         k.id AS kanban_task_id
-         FROM agent_delegation_tasks t
-         JOIN standups s ON s.id = t.standup_id
-         LEFT JOIN agents a ON a.id = t.to_agent_id
-         LEFT JOIN kanban_tasks k ON k.agent_delegation_task_id = t.id
-         WHERE t.status = 'completed' AND t.response_content IS NOT NULL AND t.response_content != ''
-         ORDER BY t.completed_at DESC LIMIT ?`
-      )
-      .all(limit);
-    const notifications = rows.map((r) => ({
-      id: r.id,
-      standup_id: r.standup_id,
-      to_agent_id: r.to_agent_id,
-      agent_name: r.agent_name || r.to_agent_id,
-      completed_at: r.completed_at,
-      scheduled_at: r.scheduled_at,
-      standup_title: r.title,
-      standup_source: r.standup_source,
-      kanban_task_id: r.kanban_task_id,
-      is_job_pipeline: r.standup_source === 'job_pipeline' || String(r.prompt || '').includes('[job_pipeline:'),
-      prompt_snippet: (r.prompt || '').trim().slice(0, 120),
-      response_snippet: (r.response_content || '').trim().slice(0, 150),
-    }));
+    const notifications = listAgentResponseNotificationsForUser(req.authUser, { limit });
     res.json({ notifications });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -255,7 +232,7 @@ router.get('/:id/messages', (req, res) => {
 
 // Standup chat: message COO (OpenClaw) or get work from team (delegate via Message API, COO presents to CEO).
 // Body: { content } for chat with COO agent, or { action: 'get_work_from_team', context?: string }
-router.post('/:id/messages', async (req, res) => {
+router.post('/:id/messages', requireAuth, async (req, res) => {
   try {
     const standupId = Number(req.params.id);
     const standup = db().prepare('SELECT * FROM standups WHERE id = ?').get(standupId);
@@ -266,7 +243,8 @@ router.post('/:id/messages', async (req, res) => {
 
     const { content, action, context } = req.body;
     const openclawId = coo.openclaw_agent_id || 'main';
-    const sessionUser = openclaw.sessionUserFor(coo.id, STANDUP_CHAT_SESSION);
+    const ownerUserId = resolveChatOwnerUserId(req, req.body || {});
+    const sessionUser = openclaw.sessionUserFor(coo.id, ownerUserId);
 
     if (action === 'get_work_from_team') {
       db().prepare('INSERT INTO standup_messages (standup_id, role, content) VALUES (?, ?, ?)').run(standupId, 'user', 'Get work from team.');

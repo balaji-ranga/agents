@@ -86,6 +86,31 @@ function agentIdFromSessionKey(sessionKey: string | undefined): string | null {
   return m ? m[1] : null;
 }
 
+const SESSION_USER_PREFIX = "agent-os-";
+
+/** Parse CEO user id from session user string (agent-os-{agentId}-{userId}). */
+function ownerUserIdFromSessionUser(sessionUser: string | undefined, agentId: string | null): string | null {
+  if (!sessionUser || typeof sessionUser !== "string") return null;
+  const s = sessionUser.trim();
+  if (!s.startsWith(SESSION_USER_PREFIX)) return null;
+  const rest = s.slice(SESSION_USER_PREFIX.length);
+  if (agentId) {
+    const safeAgent = String(agentId).replace(/[^a-zA-Z0-9_.-]/g, "_");
+    const prefix = `${safeAgent}-`;
+    if (rest.startsWith(prefix)) return rest.slice(prefix.length) || null;
+  }
+  const dashIdx = rest.indexOf("-");
+  if (dashIdx >= 0 && dashIdx < rest.length - 1) return rest.slice(dashIdx + 1);
+  return null;
+}
+
+function ownerUserIdFromSessionKey(sessionKey: string | undefined): string | null {
+  if (!sessionKey || typeof sessionKey !== "string") return null;
+  const m = sessionKey.match(/^agent::([^:]+):(.+)$/);
+  if (!m) return null;
+  return ownerUserIdFromSessionUser(m[2], m[1]);
+}
+
 export default function (api: { registerTool: Function; config: Record<string, unknown>; context?: unknown; sessionKey?: string; getSessionKey?: () => string }) {
   const pluginConfig = (api.config?.plugins as Record<string, unknown>)?.entries?.["agent-os-content-tools"] as Record<string, unknown> | undefined;
   const baseUrl = (pluginConfig?.config as Record<string, unknown>)?.baseUrl as string | undefined
@@ -129,17 +154,48 @@ export default function (api: { registerTool: Function; config: Record<string, u
   async function callInvoke(
     toolName: string,
     params: Record<string, unknown>,
-    callerAgentId?: string | null
+    callerAgentId?: string | null,
+    toolCtx?: { agentId?: string; sessionKey?: string }
   ): Promise<{ ok: boolean; data?: unknown; error?: string }> {
     const url = getBaseUrl();
     if (!url) {
       return { ok: false, error: "Agent OS backend URL not set. Set plugins.entries['agent-os-content-tools'].config.baseUrl or AGENT_OS_API_URL." };
     }
+    if (!apiKey) {
+      return {
+        ok: false,
+        error: "TOOLS_API_KEY not configured for agent-os-content-tools plugin (set plugins config apiKey or TOOLS_API_KEY env).",
+      };
+    }
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+    headers["Authorization"] = `Bearer ${apiKey}`;
     if (callerAgentId) headers["x-openclaw-agent-id"] = callerAgentId;
+
+    const sessionKey =
+      toolCtx?.sessionKey ||
+      (typeof (api as Record<string, unknown>).getSessionKey === "function"
+        ? ((api as Record<string, unknown>).getSessionKey as () => string)()
+        : (api as Record<string, unknown>).sessionKey) as string | undefined;
+    if (sessionKey) {
+      headers["x-openclaw-session-key"] = sessionKey;
+      const ownerUserId = ownerUserIdFromSessionKey(sessionKey);
+      if (ownerUserId) headers["x-ceo-user-id"] = ownerUserId;
+    }
+
+    if (!headers["x-openclaw-session-key"]) {
+      return {
+        ok: false,
+        error:
+          "OpenClaw session key unavailable — cannot scope this tool to the current CEO. Chat from Agent OS UI so the session is bound to the user.",
+      };
+    }
+
     const body: Record<string, unknown> = { tool_name: toolName, ...params };
     if (callerAgentId) body.caller_agent_id = callerAgentId;
+    const ownerFromHeader = headers["x-ceo-user-id"];
+    if (ownerFromHeader && !body.ceo_user_id && !body.owner_user_id) {
+      body.ceo_user_id = ownerFromHeader;
+    }
     try {
       const res = await fetch(`${url}/api/tools/invoke`, {
         method: "POST",
@@ -174,7 +230,7 @@ export default function (api: { registerTool: Function; config: Record<string, u
     agent_workflow_list: {
       type: "object" as const,
       properties: {
-        ceo_user_id: { type: "string", description: "Optional CEO owner user id (defaults to platform CEO)." },
+        ceo_user_id: { type: "string", description: "Ignored — owner is taken from the OpenClaw chat session." },
         chat_only: { type: "boolean", description: "If true, only workflows with chat trigger phrases (default false = all published)." },
       },
       additionalProperties: true,
@@ -233,7 +289,7 @@ export default function (api: { registerTool: Function; config: Record<string, u
           const raw = params || {};
           const invokeCaller = resolveCallerAgentId(raw, toolCtx);
           const { __openclaw_agent_id, caller_agent_id, agent_id, ...rest } = raw;
-          const result = await callInvoke(name, rest, invokeCaller);
+          const result = await callInvoke(name, rest, invokeCaller, toolCtx);
           const text = result.ok ? JSON.stringify(result.data) : JSON.stringify({ error: result.error });
           return { content: [{ type: "text" as const, text }] };
         },

@@ -36,6 +36,7 @@ The `init` container runs `setup-openclaw-from-scratch.sh --docker`, which match
 | `openclaw.json` agents (Bala, COO, Workflow Builder, …) | ✓ | ✓ |
 | Job Applicant agents + job tools | manual (`setup-job-applicant-agents.js`) | ✓ default |
 | Content tools plugin + `baseUrl` → backend | manual env | ✓ `http://backend:3001` |
+| Content tools plugin `apiKey` ↔ backend `TOOLS_API_KEY` | `ensure-tools-api-key.js` | ✓ init via `configure-openclaw-docker.js` |
 | Gateway token auth | manual `.env` | ✓ from `OPENCLAW_GATEWAY_TOKEN` |
 | Browser tool + Playwright Chromium | manual PS script | ✓ |
 | Browser TOOLS.md sections | manual sync script | ✓ |
@@ -90,7 +91,7 @@ It runs inside the **`init`** container (or on bare metal) and:
 2. Seeds SQLite (`seed-all.js`, `seed-expenses.js`)
 3. Installs skills + extensions
 4. Writes `openclaw.json` (agents, plugins, browser, gateway)
-5. Applies Docker overrides (`configure-openclaw-docker.js`) — gateway token, plugin `baseUrl`
+5. Applies Docker overrides (`configure-openclaw-docker.js`) — gateway token, plugin `baseUrl`, plugin `apiKey`
 6. Workspace templates + COO AGENTS.md + session dirs
 7. Optional Playwright Chromium (`--install-browser`)
 
@@ -103,7 +104,44 @@ docker compose restart openclaw backend
 
 ## Environment & LLM secrets
 
-All secrets live in **`deploy/.env`** (gitignored). Compose injects them as **runtime environment variables** — they are **not** baked into images and **not** written to `openclaw.json` (except `OPENCLAW_GATEWAY_TOKEN` at init).
+All secrets live in **`deploy/.env`** (gitignored). Compose injects them as **runtime environment variables** — they are **not** baked into images. At init, **`OPENCLAW_GATEWAY_TOKEN`** and **`TOOLS_API_KEY`** are also written into `openclaw.json` (gateway auth + content-tools plugin).
+
+### Shared keys: backend ↔ OpenClaw
+
+| Key | Backend | OpenClaw |
+|-----|---------|----------|
+| `OPENCLAW_GATEWAY_TOKEN` | `OPENCLAW_GATEWAY_TOKEN` env | `gateway.auth.token` in openclaw.json |
+| `TOOLS_API_KEY` | `TOOLS_API_KEY` env | `plugins.entries['agent-os-content-tools'].config.apiKey` |
+
+Both sides must match or COO/content-tools calls fail with 401.
+
+**First deploy / auto-generate:**
+
+```bash
+cd agent-os/deploy
+cp .env.example .env
+# up.sh runs this before init if TOOLS_API_KEY is missing:
+node ../scripts/ensure-tools-api-key.js --env-file .env --skip-openclaw
+docker compose --profile init run --rm init
+```
+
+**Local dev (non-Docker):**
+
+```bash
+cd agent-os
+node scripts/ensure-tools-api-key.js
+# syncs backend/.env + ~/.openclaw/openclaw.json
+```
+
+**Rotate or fix a mismatch:**
+
+```bash
+# 1. Set the same value in deploy/.env (or re-run ensure-tools-api-key.js)
+# 2. Re-apply openclaw.json plugin config:
+docker compose run --rm openclaw node deploy/scripts/configure-openclaw-docker.js
+# 3. Recreate services so env is picked up:
+docker compose up -d --force-recreate openclaw backend
+```
 
 ### OpenClaw gateway (`openclaw` container)
 
@@ -135,12 +173,14 @@ Gets the same gateway LLM vars plus:
 
 - `AGENT_OS_PUBLIC_URL` — public HTTPS URL (workflow webhooks, callbacks)
 - `OPENCLAW_GATEWAY_TOKEN` — must match `gateway.auth.token` in openclaw.json (set by init)
+- `TOOLS_API_KEY` — must match `plugins.entries['agent-os-content-tools'].config.apiKey` (set by init)
 - `VITE_API_URL=/api` — frontend calls nginx-relative API path
 - Do **not** publish OpenClaw port 18789 to the host
 
 After changing keys in `.env`:
 
 ```bash
+docker compose run --rm openclaw node deploy/scripts/configure-openclaw-docker.js
 docker compose up -d --force-recreate openclaw backend
 ```
 

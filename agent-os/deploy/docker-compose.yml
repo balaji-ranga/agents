@@ -7,7 +7,8 @@
 #   docker compose up -d
 #
 # LLM keys: set in deploy/.env — injected at runtime into openclaw + backend containers.
-# Never committed; never written to openclaw.json (except gateway token + Ollama placeholder).
+# Never committed; never baked into images.
+# Written to openclaw.json at init: gateway.auth.token, agent-os-content-tools.config.apiKey (from TOOLS_API_KEY).
 
 name: agent-os
 
@@ -40,6 +41,7 @@ x-openclaw-env: &openclaw-env
   PLAYWRIGHT_BROWSERS_PATH: /opt/playwright
   OPENCLAW_GATEWAY_PORT: "18789"
   OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+  TOOLS_API_KEY: ${TOOLS_API_KEY:-}
   AGENT_OS_INTERNAL_API_URL: http://backend:3001
 
 x-backend-env: &backend-env
@@ -54,6 +56,7 @@ x-backend-env: &backend-env
   AGENT_OS_PUBLIC_URL: ${AGENT_OS_PUBLIC_URL}
   OPENCLAW_GATEWAY_URL: http://openclaw:18789
   OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+  TOOLS_API_KEY: ${TOOLS_API_KEY:-}
   OPENAI_COO_MODEL: ${OPENAI_COO_MODEL:-}
   OPENAI_INTENT_MODEL: ${OPENAI_INTENT_MODEL:-}
   OPENROUTER_HTTP_REFERER: ${OPENROUTER_HTTP_REFERER:-}

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createSession } from '../services/auth/session.js';
+import { createSession, getSessionRow, revokeSession } from '../services/auth/session.js';
 import {
   authenticateUser,
   registerCeoUser,
@@ -56,18 +56,34 @@ router.post('/logout', requireAuth, (req, res) => {
   logout(req, res);
 });
 
+router.post('/exit-impersonation', requireAuth, (req, res) => {
+  try {
+    const row = getSessionRow(req.sessionToken);
+    if (!row?.impersonator_user_id) {
+      return res.status(400).json({ error: 'Not viewing as another user' });
+    }
+    revokeSession(req.sessionToken);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 router.get('/me', requireAuth, (req, res) => {
   try {
     const user = getUserById(req.authUser.id);
-    const agents = req.authUser.role === 'ceo' ? listAgentsForUser(req.authUser.id) : [];
-    res.json({
-      user,
-      agents,
+    const payload = {
+      user: req.authUser.impersonation ? { ...user, impersonation: req.authUser.impersonation } : user,
+      agents: req.authUser.role === 'ceo' ? listAgentsForUser(req.authUser.id) : [],
       data_ceo_user_id: req.authUser.role === 'ceo' ? resolveCeoDataUserId(req.authUser.id) : null,
       ceo_db_mode: req.authUser.role === 'ceo' ? getCeoDbModeForUser(req.authUser.id) : null,
       uses_shared_db: req.authUser.role === 'ceo' ? !usesTenantCeoDb(req.authUser.id) : null,
       uses_platform_db: req.authUser.role === 'ceo' && req.authUser.id === getBalaCeoAuthId(),
-    });
+    };
+    if (req.authUser.impersonation) {
+      payload.impersonation = req.authUser.impersonation;
+    }
+    res.json(payload);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

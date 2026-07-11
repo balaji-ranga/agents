@@ -15,6 +15,9 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
+echo "Ensuring TOOLS_API_KEY in deploy/.env..."
+node "${DEPLOY_DIR}/../scripts/ensure-tools-api-key.js" --env-file "${DEPLOY_DIR}/.env" --skip-openclaw
+
 if [[ ! -f nginx/certs/fullchain.pem ]]; then
   echo "TLS certs missing — generating dev self-signed certs..."
   bash scripts/generate-dev-certs.sh

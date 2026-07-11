@@ -94,6 +94,8 @@ export const api = {
   standupGet: (id) => get(`/standups/${id}`),
   standupCreate: (body) => post('/standups', body),
   standupNotifications: (limit) => get(limit ? `/standups/notifications?limit=${limit}` : '/standups/notifications'),
+  platformNotifications: (limit) =>
+    get(limit ? `/platform-notifications?limit=${limit}` : '/platform-notifications'),
   standupUpdate: (id, body) => patch(`/standups/${id}`, body),
   standupResponses: (id) => get(`/standups/${id}/responses`),
   standupAddResponse: (id, agentId, content) => post(`/standups/${id}/responses`, { agent_id: agentId, content }),
@@ -204,6 +206,9 @@ export const api = {
   adminEnableAgent: (userId, agentId) => post(`/admin/users/${encodeURIComponent(userId)}/agents/${encodeURIComponent(agentId)}/enable`, {}),
   adminDisableAgent: (userId, agentId) => post(`/admin/users/${encodeURIComponent(userId)}/agents/${encodeURIComponent(agentId)}/disable`, {}),
   adminAgentsGrouped: () => get('/admin/agents'),
+  adminSendNotifications: (body) => post('/admin/notifications', body),
+  adminImpersonateUser: (userId) => post(`/admin/users/${encodeURIComponent(userId)}/impersonate`, {}),
+  authExitImpersonation: () => post('/auth/exit-impersonation', {}),
   // Agent workflows (custom, separate from job workflows)
   agentWorkflowList: (params = {}) => {
     const q = new URLSearchParams();

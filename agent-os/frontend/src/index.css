@@ -661,6 +661,34 @@ button {
   opacity: 1;
 }
 
+.impersonation-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 1rem;
+  background: rgba(124, 58, 237, 0.15);
+  border-bottom: 1px solid rgba(124, 58, 237, 0.35);
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.impersonation-banner-exit {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.impersonation-banner-exit:hover {
+  background: var(--accent-hover);
+}
+
 .wf-status {
   font-size: 0.7rem;
   padding: 2px 8px;

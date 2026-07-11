@@ -21,9 +21,11 @@ import {
   enquireWorkflows,
 } from '../services/agent-workflow-chat-tools.js';
 import { applyWorkflowBuilderActions, getWorkflowDraftForAgent } from '../services/agent-workflow-builder.js';
-import { resolveAuthenticatedCeoUserId } from '../middleware/auth.js';
+import { resolveAuthenticatedCeoUserId, attachAuthUser, requireAuth, requireCeoOrAdmin } from '../middleware/auth.js';
+import { requireToolsAccess, attachToolsAuth } from '../middleware/tools-auth.js';
 import { getPublicBaseUrl } from '../config/public-url.js';
 import { getOpenClawMediaDir } from '../config/openclaw-paths.js';
+import { resolveToolOwnerUserId, resolveToolOwnerUserIdOrNull, bodyWithoutSpoofedOwner } from '../services/tool-owner-scope.js';
 import jobApplicantTools from './job-applicant-tools.js';
 
 const router = Router();
@@ -60,19 +62,28 @@ function getBackendBaseUrl() {
   return getPublicBaseUrl();
 }
 
-function logContentTool(toolName, requestPayload, responsePayload, status, source = null) {
+function logContentTool(toolName, requestPayload, responsePayload, status, source = null, ownerUserId = null) {
   try {
     const db = getDb();
     db.prepare(
-      `INSERT INTO content_tool_logs (tool_name, source, request_payload, response_payload, status) VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO content_tool_logs (tool_name, source, request_payload, response_payload, status, owner_user_id) VALUES (?, ?, ?, ?, ?, ?)`
     ).run(
       toolName,
       source || null,
       typeof requestPayload === 'string' ? requestPayload : JSON.stringify(requestPayload || {}),
       typeof responsePayload === 'string' ? responsePayload : JSON.stringify(responsePayload || {}),
-      status
+      status,
+      ownerUserId || null
     );
   } catch (_) {}
+}
+
+function ownerForToolLog(req, body = {}) {
+  return resolveToolOwnerUserIdOrNull(req, body, resolveAuthenticatedCeoUserId);
+}
+
+function logTool(req, toolName, requestPayload, responsePayload, status, source = null) {
+  logContentTool(toolName, requestPayload, responsePayload, status, source, ownerForToolLog(req, requestPayload));
 }
 
 function stripHtml(html) {
@@ -96,21 +107,17 @@ function extractTitle(html) {
 }
 
 function optionalAuth(req, res, next) {
-  if (req.headers['x-internal-test'] === '1') return next();
-  const apiKey = getToolsApiKey();
-  if (!apiKey) return next();
-  const auth = req.headers.authorization;
-  const token = auth && auth.startsWith('Bearer ') ? auth.slice(7) : '';
-  if (token !== apiKey) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  next();
+  return requireToolsAccess(req, res, next);
+}
+
+function resolveWorkflowOwner(req, body = {}) {
+  return resolveWorkflowOwnerUserId(req, bodyWithoutSpoofedOwner(body), resolveAuthenticatedCeoUserId);
 }
 
 /**
- * GET /meta — list all content tools metadata (no auth for dashboard).
+ * GET /meta — list content tools metadata (authenticated CEO/admin).
  */
-router.get('/meta', (req, res) => {
+router.get('/meta', attachToolsAuth, requireAuth, requireCeoOrAdmin, (req, res) => {
   try {
     const list = meta.listToolsMeta();
     res.json({ tools: list });
@@ -120,9 +127,9 @@ router.get('/meta', (req, res) => {
 });
 
 /**
- * PATCH /meta/:name — update tool metadata (e.g. enabled, purpose). No auth so dashboard can manage.
+ * PATCH /meta/:name — update tool metadata.
  */
-router.patch('/meta/:name', (req, res) => {
+router.patch('/meta/:name', attachToolsAuth, requireAuth, requireCeoOrAdmin, (req, res) => {
   try {
     const name = req.params.name?.trim();
     if (!name) return res.status(400).json({ error: 'name required' });
@@ -136,9 +143,9 @@ router.patch('/meta/:name', (req, res) => {
 });
 
 /**
- * POST /meta — onboard new tool. Body: { name, display_name, endpoint, method?, purpose?, model_used? }.
+ * POST /meta — onboard new tool.
  */
-router.post('/meta', (req, res) => {
+router.post('/meta', attachToolsAuth, requireAuth, requireCeoOrAdmin, (req, res) => {
   try {
     const record = meta.createToolMeta(req.body || {});
     res.status(201).json(record);
@@ -150,9 +157,9 @@ router.post('/meta', (req, res) => {
 });
 
 /**
- * POST /test/:name — test a tool with given body. No auth for dashboard.
+ * POST /test/:name — test a tool with given body.
  */
-router.post('/test/:name', async (req, res) => {
+router.post('/test/:name', attachToolsAuth, requireAuth, requireCeoOrAdmin, async (req, res) => {
   try {
     const name = req.params.name?.trim();
     if (!name) return res.status(400).json({ error: 'name required' });
@@ -180,12 +187,14 @@ router.post('/test/:name', async (req, res) => {
 });
 
 /**
- * GET /logs — no auth so the dashboard can fetch.
- * Query: limit (default 50), offset (default 0), tool (optional filter by tool_name)
- * Returns: { logs: [...], total: number }
+ * GET /logs — scoped to signed-in CEO (admin must impersonate).
  */
-router.get('/logs', (req, res) => {
+router.get('/logs', attachAuthUser, requireAuth, (req, res) => {
   try {
+    if (req.authUser.role === 'admin' && !req.authUser.impersonation) {
+      return res.json({ logs: [], total: 0 });
+    }
+    const ownerUserId = resolveAuthenticatedCeoUserId(req, req.query || {});
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     const tool = typeof req.query.tool === 'string' ? req.query.tool.trim() : null;
@@ -193,42 +202,54 @@ router.get('/logs', (req, res) => {
     let rows;
     let total;
     if (tool) {
-      total = db.prepare('SELECT COUNT(*) AS n FROM content_tool_logs WHERE tool_name = ?').get(tool).n;
-      rows = db.prepare(
-        'SELECT id, tool_name, source, request_payload, response_payload, status, created_at FROM content_tool_logs WHERE tool_name = ? ORDER BY created_at DESC LIMIT ? OFFSET ?'
-      ).all(tool, limit, offset);
+      total = db
+        .prepare('SELECT COUNT(*) AS n FROM content_tool_logs WHERE owner_user_id = ? AND tool_name = ?')
+        .get(ownerUserId, tool).n;
+      rows = db
+        .prepare(
+          'SELECT id, tool_name, source, request_payload, response_payload, status, owner_user_id, created_at FROM content_tool_logs WHERE owner_user_id = ? AND tool_name = ? ORDER BY created_at DESC LIMIT ? OFFSET ?'
+        )
+        .all(ownerUserId, tool, limit, offset);
     } else {
-      total = db.prepare('SELECT COUNT(*) AS n FROM content_tool_logs').get().n;
-      rows = db.prepare(
-        'SELECT id, tool_name, source, request_payload, response_payload, status, created_at FROM content_tool_logs ORDER BY created_at DESC LIMIT ? OFFSET ?'
-      ).all(limit, offset);
+      total = db.prepare('SELECT COUNT(*) AS n FROM content_tool_logs WHERE owner_user_id = ?').get(ownerUserId).n;
+      rows = db
+        .prepare(
+          'SELECT id, tool_name, source, request_payload, response_payload, status, owner_user_id, created_at FROM content_tool_logs WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?'
+        )
+        .all(ownerUserId, limit, offset);
     }
-    res.json({ logs: rows, total });
+    res.json({ logs: rows, total, owner_user_id: ownerUserId });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
 /**
- * DELETE /logs — cleanup content_tool_logs. Query: older_than_days (keep logs newer than N days), or all=1 to delete all.
+ * DELETE /logs — cleanup content_tool_logs for signed-in CEO only.
  */
-router.delete('/logs', (req, res) => {
+router.delete('/logs', attachAuthUser, requireAuth, (req, res) => {
   try {
+    if (req.authUser.role === 'admin' && !req.authUser.impersonation) {
+      return res.status(403).json({ error: 'Admin must impersonate a user to manage tool logs' });
+    }
+    const ownerUserId = resolveAuthenticatedCeoUserId(req, req.query || {});
     const db = getDb();
     const all = req.query.all === '1' || req.query.all === 'true';
     let deleted = 0;
     if (all) {
-      const result = db.prepare('DELETE FROM content_tool_logs').run();
+      const result = db.prepare('DELETE FROM content_tool_logs WHERE owner_user_id = ?').run(ownerUserId);
       deleted = result.changes;
     } else {
       const days = Math.max(0, parseInt(req.query.older_than_days, 10) || 7);
       const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-      const result = db.prepare('DELETE FROM content_tool_logs WHERE created_at < ?').run(cutoff);
+      const result = db
+        .prepare('DELETE FROM content_tool_logs WHERE owner_user_id = ? AND created_at < ?')
+        .run(ownerUserId, cutoff);
       deleted = result.changes;
     }
-    res.json({ deleted });
+    res.json({ deleted, owner_user_id: ownerUserId });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -247,18 +268,18 @@ router.post('/summarize-url', async (req, res) => {
   try {
     const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
     if (!url) {
-      logContentTool('summarize_url', requestPayload, { error: 'url is required' }, 'error', source);
+      logTool(req,'summarize_url', requestPayload, { error: 'url is required' }, 'error', source);
       return res.status(400).json({ error: 'url is required' });
     }
     let parsed;
     try {
       parsed = new URL(url);
     } catch (_) {
-      logContentTool('summarize_url', requestPayload, { error: 'Invalid URL' }, 'error', source);
+      logTool(req,'summarize_url', requestPayload, { error: 'Invalid URL' }, 'error', source);
       return res.status(400).json({ error: 'Invalid URL' });
     }
     if (parsed.protocol !== 'https:') {
-      logContentTool('summarize_url', requestPayload, { error: 'Only HTTPS URLs are allowed' }, 'error', source);
+      logTool(req,'summarize_url', requestPayload, { error: 'Only HTTPS URLs are allowed' }, 'error', source);
       return res.status(400).json({ error: 'Only HTTPS URLs are allowed' });
     }
 
@@ -266,7 +287,7 @@ router.post('/summarize-url', async (req, res) => {
     if (allowedDomains && allowedDomains.length > 0) {
       const host = parsed.hostname.toLowerCase();
       if (!allowedDomains.some((d) => host === d || host.endsWith('.' + d))) {
-        logContentTool('summarize_url', requestPayload, { error: 'URL domain not allowed' }, 'error', source);
+        logTool(req,'summarize_url', requestPayload, { error: 'URL domain not allowed' }, 'error', source);
         return res.status(400).json({ error: 'URL domain not allowed' });
       }
     }
@@ -283,7 +304,7 @@ router.post('/summarize-url', async (req, res) => {
       });
       clearTimeout(timeoutId);
       if (!response.ok) {
-        logContentTool('summarize_url', requestPayload, { error: `Upstream returned ${response.status}` }, 'error', source);
+        logTool(req,'summarize_url', requestPayload, { error: `Upstream returned ${response.status}` }, 'error', source);
         return res.status(502).json({ error: `Upstream returned ${response.status}` });
       }
       const reader = response.body.getReader();
@@ -301,7 +322,7 @@ router.post('/summarize-url', async (req, res) => {
     } catch (e) {
       clearTimeout(timeoutId);
       const errMsg = e.name === 'AbortError' ? 'Request timeout' : 'Failed to fetch URL';
-      logContentTool('summarize_url', requestPayload, { error: errMsg }, 'error', source);
+      logTool(req,'summarize_url', requestPayload, { error: errMsg }, 'error', source);
       if (e.name === 'AbortError') {
         return res.status(504).json({ error: 'Request timeout' });
       }
@@ -326,7 +347,7 @@ router.post('/summarize-url', async (req, res) => {
         });
         const summary = (summaryText && summaryText.trim()) || rawText.slice(0, 500);
         const out = { summary, title: title || undefined };
-        logContentTool('summarize_url', requestPayload, out, 'ok', source);
+        logTool(req,'summarize_url', requestPayload, out, 'ok', source);
         return res.json(out);
       } catch (_) {
         // fall through to raw extract
@@ -335,10 +356,10 @@ router.post('/summarize-url', async (req, res) => {
 
     const summary = rawText.slice(0, 1500).trim() || 'No text content could be extracted.';
     const out = { summary, title: title || undefined };
-    logContentTool('summarize_url', requestPayload, out, 'ok', source);
+    logTool(req,'summarize_url', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
-    logContentTool('summarize_url', requestPayload, { error: 'Internal error' }, 'error', source);
+    logTool(req,'summarize_url', requestPayload, { error: 'Internal error' }, 'error', source);
     res.status(500).json({ error: 'Internal error' });
   }
 });
@@ -403,13 +424,13 @@ router.post('/generate-image', optionalAuth, async (req, res) => {
   const requestPayload = { prompt, style_hint: styleHint || undefined };
   try {
     if (!prompt) {
-      logContentTool('generate_image', requestPayload, { error: 'prompt is required' }, 'error', source);
+      logTool(req,'generate_image', requestPayload, { error: 'prompt is required' }, 'error', source);
       return res.status(400).json({ error: 'prompt is required' });
     }
     const { primary, secondary } = getImageConfig();
     const endpoints = [primary, secondary].filter((ep) => ep && ep.apiKey);
     if (endpoints.length === 0) {
-      logContentTool('generate_image', requestPayload, { error: 'Image generation not configured (OPENAI_API_KEY or primary/secondary)' }, 'error', source);
+      logTool(req,'generate_image', requestPayload, { error: 'Image generation not configured (OPENAI_API_KEY or primary/secondary)' }, 'error', source);
       return res.status(503).json({ error: 'Image generation not configured. Set OPENAI_API_KEY or OPENAI_PRIMARY_API_KEY (and optionally OPENAI_SECONDARY_*).' });
     }
     let fullPrompt = prompt;
@@ -439,17 +460,17 @@ router.post('/generate-image', optionalAuth, async (req, res) => {
           continue;
         }
         const out = { url: result.url };
-        logContentTool('generate_image', requestPayload, out, 'ok', source);
+        logTool(req,'generate_image', requestPayload, out, 'ok', source);
         return res.json(out);
       } catch (e) {
         lastErr = e.name === 'AbortError' ? 'Request timeout' : (e.message || 'Internal error');
       }
     }
-    logContentTool('generate_image', requestPayload, { error: lastErr }, 'error', source);
+    logTool(req,'generate_image', requestPayload, { error: lastErr }, 'error', source);
     return res.status(502).json({ error: lastErr || 'Image API error' });
   } catch (e) {
     const errMsg = e.name === 'AbortError' ? 'Request timeout' : (e.message || 'Internal error');
-    logContentTool('generate_image', requestPayload, { error: errMsg }, 'error', source);
+    logTool(req,'generate_image', requestPayload, { error: errMsg }, 'error', source);
     return res.status(500).json({ error: errMsg });
   }
 });
@@ -464,13 +485,13 @@ router.post('/generate-video', optionalAuth, async (req, res) => {
   const requestPayload = req.body || {};
   try {
     if (!prompt) {
-      logContentTool('generate_video', requestPayload, { error: 'prompt is required' }, 'error', source);
+      logTool(req,'generate_video', requestPayload, { error: 'prompt is required' }, 'error', source);
       return res.status(400).json({ error: 'prompt is required' });
     }
     const { primary, secondary } = getVideoConfig();
     const endpoints = [primary, secondary].filter((ep) => ep && ep.apiToken && ep.modelVersion);
     if (endpoints.length === 0) {
-      logContentTool('generate_video', requestPayload, { error: 'Video generation not configured (REPLICATE_API_TOKEN or primary/secondary)' }, 'error', source);
+      logTool(req,'generate_video', requestPayload, { error: 'Video generation not configured (REPLICATE_API_TOKEN or primary/secondary)' }, 'error', source);
       return res.status(503).json({ error: 'Video generation not configured. Set REPLICATE_API_TOKEN (and optionally REPLICATE_SECONDARY_*).' });
     }
     let lastErr;
@@ -502,17 +523,17 @@ router.post('/generate-video', optionalAuth, async (req, res) => {
           url = typeof outVal === 'string' ? outVal : outVal?.url || null;
         }
         const out = { job_id: jobId, status, url: url || undefined };
-        logContentTool('generate_video', requestPayload, out, 'ok', source);
+        logTool(req,'generate_video', requestPayload, out, 'ok', source);
         return res.json(out);
       } catch (e) {
         lastErr = e.name === 'AbortError' ? 'Request timeout' : (e.message || 'Internal error');
       }
     }
-    logContentTool('generate_video', requestPayload, { error: lastErr }, 'error', source);
+    logTool(req,'generate_video', requestPayload, { error: lastErr }, 'error', source);
     return res.status(502).json({ error: lastErr || 'Replicate API error' });
   } catch (e) {
     const errMsg = e.name === 'AbortError' ? 'Request timeout' : (e.message || 'Internal error');
-    logContentTool('generate_video', requestPayload, { error: errMsg }, 'error', source);
+    logTool(req,'generate_video', requestPayload, { error: errMsg }, 'error', source);
     return res.status(500).json({ error: errMsg });
   }
 });
@@ -529,14 +550,14 @@ router.post('/kanban-move-status', optionalAuth, (req, res) => {
   try {
     if (!taskId || !KANBAN_STATUSES.includes(newStatus)) {
       const err = { error: 'task_id and new_status required; new_status one of: ' + KANBAN_STATUSES.join(', ') };
-      logContentTool('kanban_move_status', requestPayload, err, 'error', source);
+      logTool(req,'kanban_move_status', requestPayload, err, 'error', source);
       return res.status(400).json(err);
     }
     const db = getDb();
     const task = db.prepare('SELECT * FROM kanban_tasks WHERE id = ?').get(taskId);
     if (!task) {
       const err = { error: 'Task not found' };
-      logContentTool('kanban_move_status', requestPayload, err, 'error', source);
+      logTool(req,'kanban_move_status', requestPayload, err, 'error', source);
       return res.status(404).json(err);
     }
     let caller = getCallerAgent(req);
@@ -550,16 +571,16 @@ router.post('/kanban-move-status', optionalAuth, (req, res) => {
     const isAssigned = task.assigned_agent_id && caller && (task.assigned_agent_id === caller.id || task.assigned_agent_id === caller.name);
     if (!isCoo && !isAssigned) {
       const err = { error: 'Only COO or the assigned agent can move this task status' };
-      logContentTool('kanban_move_status', requestPayload, err, 'error', source);
+      logTool(req,'kanban_move_status', requestPayload, err, 'error', source);
       return res.status(403).json(err);
     }
     db.prepare("UPDATE kanban_tasks SET status = ?, updated_at = datetime('now') WHERE id = ?").run(newStatus, taskId);
     const out = { ok: true, task_id: taskId, status: newStatus };
-    logContentTool('kanban_move_status', requestPayload, out, 'ok', source);
+    logTool(req,'kanban_move_status', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
     const err = { error: e.message };
-    logContentTool('kanban_move_status', requestPayload, err, 'error', source);
+    logTool(req,'kanban_move_status', requestPayload, err, 'error', source);
     res.status(500).json(err);
   }
 });
@@ -574,35 +595,35 @@ router.post('/kanban-reassign-to-coo', optionalAuth, (req, res) => {
   try {
     if (!taskId) {
       const err = { error: 'task_id required' };
-      logContentTool('kanban_reassign_to_coo', requestPayload, err, 'error', source);
+      logTool(req,'kanban_reassign_to_coo', requestPayload, err, 'error', source);
       return res.status(400).json(err);
     }
     const caller = getCallerAgent(req);
     if (caller && caller.is_coo) {
       const err = { error: 'COO cannot use reassign-to-coo; use assign-task to assign to another agent' };
-      logContentTool('kanban_reassign_to_coo', requestPayload, err, 'error', source);
+      logTool(req,'kanban_reassign_to_coo', requestPayload, err, 'error', source);
       return res.status(403).json(err);
     }
     const cooId = getCooAgentId();
     if (!cooId) {
       const err = { error: 'No COO agent in system' };
-      logContentTool('kanban_reassign_to_coo', requestPayload, err, 'error', source);
+      logTool(req,'kanban_reassign_to_coo', requestPayload, err, 'error', source);
       return res.status(502).json(err);
     }
     const db = getDb();
     const task = db.prepare('SELECT * FROM kanban_tasks WHERE id = ?').get(taskId);
     if (!task) {
       const err = { error: 'Task not found' };
-      logContentTool('kanban_reassign_to_coo', requestPayload, err, 'error', source);
+      logTool(req,'kanban_reassign_to_coo', requestPayload, err, 'error', source);
       return res.status(404).json(err);
     }
     db.prepare("UPDATE kanban_tasks SET assigned_agent_id = ?, status = 'open', updated_at = datetime('now') WHERE id = ?").run(cooId, taskId);
     const out = { ok: true, task_id: taskId, assigned_agent_id: cooId };
-    logContentTool('kanban_reassign_to_coo', requestPayload, out, 'ok', source);
+    logTool(req,'kanban_reassign_to_coo', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
     const err = { error: e.message };
-    logContentTool('kanban_reassign_to_coo', requestPayload, err, 'error', source);
+    logTool(req,'kanban_reassign_to_coo', requestPayload, err, 'error', source);
     res.status(500).json(err);
   }
 });
@@ -618,35 +639,35 @@ router.post('/kanban-assign-task', optionalAuth, (req, res) => {
   try {
     if (!taskId || !toAgentId) {
       const err = { error: 'task_id and to_agent_id required' };
-      logContentTool('kanban_assign_task', requestPayload, err, 'error', source);
+      logTool(req,'kanban_assign_task', requestPayload, err, 'error', source);
       return res.status(400).json(err);
     }
     const caller = getCallerAgent(req);
     if (!caller || !caller.is_coo) {
       const err = { error: 'Only COO can assign a task to another agent' };
-      logContentTool('kanban_assign_task', requestPayload, err, 'error', source);
+      logTool(req,'kanban_assign_task', requestPayload, err, 'error', source);
       return res.status(403).json(err);
     }
     const db = getDb();
     const agent = db.prepare('SELECT id FROM agents WHERE LOWER(id) = ? OR LOWER(openclaw_agent_id) = ?').get(toAgentId, toAgentId);
     if (!agent) {
       const err = { error: 'Agent not found' };
-      logContentTool('kanban_assign_task', requestPayload, err, 'error', source);
+      logTool(req,'kanban_assign_task', requestPayload, err, 'error', source);
       return res.status(404).json(err);
     }
     const task = db.prepare('SELECT * FROM kanban_tasks WHERE id = ?').get(taskId);
     if (!task) {
       const err = { error: 'Task not found' };
-      logContentTool('kanban_assign_task', requestPayload, err, 'error', source);
+      logTool(req,'kanban_assign_task', requestPayload, err, 'error', source);
       return res.status(404).json(err);
     }
     db.prepare("UPDATE kanban_tasks SET assigned_agent_id = ?, status = 'awaiting_confirmation', updated_at = datetime('now') WHERE id = ?").run(agent.id, taskId);
     const out = { ok: true, task_id: taskId, assigned_agent_id: agent.id };
-    logContentTool('kanban_assign_task', requestPayload, out, 'ok', source);
+    logTool(req,'kanban_assign_task', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
     const err = { error: e.message };
-    logContentTool('kanban_assign_task', requestPayload, err, 'error', source);
+    logTool(req,'kanban_assign_task', requestPayload, err, 'error', source);
     res.status(500).json(err);
   }
 });
@@ -663,13 +684,13 @@ router.post('/intent-classify-and-delegate', optionalAuth, async (req, res) => {
   try {
     if (!message) {
       const err = { error: 'message required' };
-      logContentTool('intent_classify_and_delegate', requestPayload, err, 'error', source);
+      logTool(req,'intent_classify_and_delegate', requestPayload, err, 'error', source);
       return res.status(400).json(err);
     }
     const caller = getCallerAgent(req);
     if (!caller || !caller.is_coo) {
       const err = { error: 'Only COO can use intent-classify-and-delegate' };
-      logContentTool('intent_classify_and_delegate', requestPayload, err, 'error', source);
+      logTool(req,'intent_classify_and_delegate', requestPayload, err, 'error', source);
       return res.status(403).json(err);
     }
     const db = getDb();
@@ -680,7 +701,7 @@ router.post('/intent-classify-and-delegate', optionalAuth, async (req, res) => {
       const standup = db.prepare('SELECT id FROM standups WHERE id = ?').get(standupId);
       if (!standup) {
         const err = { error: 'Standup not found' };
-        logContentTool('intent_classify_and_delegate', requestPayload, err, 'error', source);
+        logTool(req,'intent_classify_and_delegate', requestPayload, err, 'error', source);
         return res.status(404).json(err);
       }
     }
@@ -692,11 +713,11 @@ router.post('/intent-classify-and-delegate', optionalAuth, async (req, res) => {
       agent_names: result.agentNames,
       kanban_task_ids: result.kanbanTaskIds || [],
     };
-    logContentTool('intent_classify_and_delegate', requestPayload, out, 'ok', source);
+    logTool(req,'intent_classify_and_delegate', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
     const err = { error: e.message };
-    logContentTool('intent_classify_and_delegate', requestPayload, err, 'error', source);
+    logTool(req,'intent_classify_and_delegate', requestPayload, err, 'error', source);
     res.status(500).json(err);
   }
 });
@@ -711,7 +732,7 @@ router.post('/agent-workflow-enquire', optionalAuth, (req, res) => {
     const caller = getCallerAgent(req);
     if (!caller || !caller.is_coo) {
       const err = { error: 'Only COO can enquire about agent workflows' };
-      logContentTool('agent_workflow_enquire', requestPayload, err, 'error', source);
+      logTool(req,'agent_workflow_enquire', requestPayload, err, 'error', source);
       return res.status(403).json(err);
     }
     const query =
@@ -722,10 +743,10 @@ router.post('/agent-workflow-enquire', optionalAuth, (req, res) => {
       '';
     if (!String(query).trim() && !requestPayload.all) {
       const err = { error: 'query or description required (or pass all: true to list every published workflow)' };
-      logContentTool('agent_workflow_enquire', requestPayload, err, 'error', source);
+      logTool(req,'agent_workflow_enquire', requestPayload, err, 'error', source);
       return res.status(400).json(err);
     }
-    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const ownerUserId = resolveWorkflowOwner(req, requestPayload);
     const out = {
       ok: true,
       ceo_user_id: ownerUserId,
@@ -734,12 +755,12 @@ router.post('/agent-workflow-enquire', optionalAuth, (req, res) => {
         all: requestPayload.all === true,
       }),
     };
-    logContentTool('agent_workflow_enquire', requestPayload, out, 'ok', source);
+    logTool(req,'agent_workflow_enquire', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
     const err = { error: e.message };
-    logContentTool('agent_workflow_enquire', requestPayload, err, 'error', source);
-    res.status(500).json(err);
+    logTool(req,'agent_workflow_enquire', requestPayload, err, 'error', source);
+    res.status(e.status || 500).json(err);
   }
 });
 
@@ -753,10 +774,10 @@ router.post('/agent-workflow-list', optionalAuth, (req, res) => {
     const caller = getCallerAgent(req);
     if (!caller || !caller.is_coo) {
       const err = { error: 'Only COO can list agent workflows' };
-      logContentTool('agent_workflow_list', requestPayload, err, 'error', source);
+      logTool(req,'agent_workflow_list', requestPayload, err, 'error', source);
       return res.status(403).json(err);
     }
-    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const ownerUserId = resolveWorkflowOwner(req, requestPayload);
     const chatOnly = requestPayload.chat_only === true || requestPayload.chatOnly === true;
     const workflows = listPublishedWorkflows(ownerUserId, { chatOnly });
     const out = {
@@ -766,11 +787,11 @@ router.post('/agent-workflow-list', optionalAuth, (req, res) => {
       workflows,
       count: workflows.length,
     };
-    logContentTool('agent_workflow_list', requestPayload, out, 'ok', source);
+    logTool(req,'agent_workflow_list', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
     const err = { error: e.message };
-    logContentTool('agent_workflow_list', requestPayload, err, 'error', source);
+    logTool(req,'agent_workflow_list', requestPayload, err, 'error', source);
     res.status(500).json(err);
   }
 });
@@ -785,17 +806,17 @@ router.post('/agent-workflow-trigger', optionalAuth, async (req, res) => {
     const caller = getCallerAgent(req);
     if (!caller || !caller.is_coo) {
       const err = { error: 'Only COO can trigger agent workflows' };
-      logContentTool('agent_workflow_trigger', requestPayload, err, 'error', source);
+      logTool(req,'agent_workflow_trigger', requestPayload, err, 'error', source);
       return res.status(403).json(err);
     }
     const message = (requestPayload.message || requestPayload.input || '').toString().trim();
     const workflowId = requestPayload.workflow_id || requestPayload.workflowId || null;
     if (!message && !workflowId) {
       const err = { error: 'message or workflow_id required' };
-      logContentTool('agent_workflow_trigger', requestPayload, err, 'error', source);
+      logTool(req,'agent_workflow_trigger', requestPayload, err, 'error', source);
       return res.status(400).json(err);
     }
-    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const ownerUserId = resolveWorkflowOwner(req, requestPayload);
     const run = await triggerAgentWorkflowForOwner(ownerUserId, {
       message,
       workflow_id: workflowId,
@@ -811,11 +832,11 @@ router.post('/agent-workflow-trigger', optionalAuth, async (req, res) => {
       status: run.status,
       ceo_user_id: ownerUserId,
     };
-    logContentTool('agent_workflow_trigger', requestPayload, out, 'ok', source);
+    logTool(req,'agent_workflow_trigger', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
     const err = { error: e.message };
-    logContentTool('agent_workflow_trigger', requestPayload, err, 'error', source);
+    logTool(req,'agent_workflow_trigger', requestPayload, err, 'error', source);
     res.status(400).json(err);
   }
 });
@@ -830,22 +851,22 @@ router.post('/agent-workflow-get-draft', optionalAuth, (req, res) => {
     const caller = getCallerAgent(req);
     if (!isWorkflowBuilderCaller(caller)) {
       const err = { error: 'Only Workflow Builder agent can get workflow drafts via this tool' };
-      logContentTool('agent_workflow_get_draft', requestPayload, err, 'error', source);
+      logTool(req,'agent_workflow_get_draft', requestPayload, err, 'error', source);
       return res.status(403).json(err);
     }
     const workflowId = requestPayload.workflow_id || requestPayload.workflowId;
     if (!workflowId) {
       const err = { error: 'workflow_id required' };
-      logContentTool('agent_workflow_get_draft', requestPayload, err, 'error', source);
+      logTool(req,'agent_workflow_get_draft', requestPayload, err, 'error', source);
       return res.status(400).json(err);
     }
-    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const ownerUserId = resolveWorkflowOwner(req, requestPayload);
     const out = { ok: true, ...getWorkflowDraftForAgent(ownerUserId, workflowId) };
-    logContentTool('agent_workflow_get_draft', requestPayload, out, 'ok', source);
+    logTool(req,'agent_workflow_get_draft', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
     const err = { error: e.message };
-    logContentTool('agent_workflow_get_draft', requestPayload, err, 'error', source);
+    logTool(req,'agent_workflow_get_draft', requestPayload, err, 'error', source);
     res.status(400).json(err);
   }
 });
@@ -860,16 +881,16 @@ router.post('/agent-workflow-mutate', optionalAuth, async (req, res) => {
     const caller = getCallerAgent(req);
     if (!isWorkflowBuilderCaller(caller)) {
       const err = { error: 'Only Workflow Builder agent can mutate workflows via this tool' };
-      logContentTool('agent_workflow_mutate', requestPayload, err, 'error', source);
+      logTool(req,'agent_workflow_mutate', requestPayload, err, 'error', source);
       return res.status(403).json(err);
     }
     const actions = requestPayload.actions;
     if (!Array.isArray(actions) || !actions.length) {
       const err = { error: 'actions array required' };
-      logContentTool('agent_workflow_mutate', requestPayload, err, 'error', source);
+      logTool(req,'agent_workflow_mutate', requestPayload, err, 'error', source);
       return res.status(400).json(err);
     }
-    const ownerUserId = resolveWorkflowOwnerUserId(req, requestPayload, resolveAuthenticatedCeoUserId);
+    const ownerUserId = resolveWorkflowOwner(req, requestPayload);
     const result = await applyWorkflowBuilderActions(
       ownerUserId,
       requestPayload.workflow_id || requestPayload.workflowId || null,
@@ -877,11 +898,11 @@ router.post('/agent-workflow-mutate', optionalAuth, async (req, res) => {
       { id: caller.id, name: caller.name, type: 'workflow_builder' }
     );
     const out = { ok: true, ...result };
-    logContentTool('agent_workflow_mutate', requestPayload, out, 'ok', source);
+    logTool(req,'agent_workflow_mutate', requestPayload, out, 'ok', source);
     res.json(out);
   } catch (e) {
     const err = { error: e.message };
-    logContentTool('agent_workflow_mutate', requestPayload, err, 'error', source);
+    logTool(req,'agent_workflow_mutate', requestPayload, err, 'error', source);
     res.status(400).json(err);
   }
 });
@@ -890,7 +911,7 @@ router.post('/agent-workflow-mutate', optionalAuth, async (req, res) => {
  * POST /invoke — invoke a tool by name (used by OpenClaw plugin). Body: { tool_name, caller_agent_id?, ...params }.
  * Uses x-openclaw-agent-id header or body.caller_agent_id so Kanban tools can authorize the calling agent.
  */
-router.post('/invoke', async (req, res) => {
+router.post('/invoke', requireToolsAccess, async (req, res) => {
   let source = (req.headers['x-openclaw-agent-id'] || req.headers['x-agent-id'] || '').toString().trim() || null;
   if (!source && req.body && (req.body.caller_agent_id != null || req.body.x_openclaw_agent_id != null)) {
     source = String(req.body.caller_agent_id ?? req.body.x_openclaw_agent_id).trim() || null;
@@ -901,12 +922,12 @@ router.post('/invoke', async (req, res) => {
     const row = meta.getToolMeta(toolName);
     if (!row) return res.status(404).json({ error: 'Tool not found' });
     if (!row.enabled) {
-      logContentTool(toolName, req.body, { error: 'Tool is disabled' }, 'error', source);
+      logTool(req,toolName, req.body, { error: 'Tool is disabled' }, 'error', source);
       return res.status(403).json({ error: 'Tool is disabled' });
     }
     const grantCheck = assertCallerMayUseTool(source, toolName);
     if (!grantCheck.ok) {
-      logContentTool(toolName, req.body, { error: grantCheck.error }, 'error', source);
+      logTool(req,toolName, req.body, { error: grantCheck.error }, 'error', source);
       return res.status(403).json({ error: grantCheck.error });
     }
     const params = { ...req.body };
@@ -924,6 +945,16 @@ router.post('/invoke', async (req, res) => {
     }
     const headers = { 'Content-Type': 'application/json' };
     if (source) headers['x-openclaw-agent-id'] = source;
+    for (const h of ['x-ceo-user-id', 'x-agent-os-user-id', 'x-openclaw-session-key', 'x-openclaw-session-user', 'x-session-key']) {
+      if (req.headers[h]) headers[h] = String(req.headers[h]);
+    }
+    const ownerUserId = resolveToolOwnerUserIdOrNull(req, params, resolveAuthenticatedCeoUserId);
+    if (ownerUserId) {
+      if (!params.ceo_user_id && !params.ceoUserId && !params.owner_user_id) {
+        params.ceo_user_id = ownerUserId;
+      }
+      if (!headers['x-ceo-user-id']) headers['x-ceo-user-id'] = ownerUserId;
+    }
     if (row.auth_header && typeof row.auth_header === 'string' && row.auth_header.trim()) {
       headers['Authorization'] = row.auth_header.trim();
     }
@@ -941,12 +972,12 @@ router.post('/invoke', async (req, res) => {
     const response = await fetch(targetUrl, fetchOpts);
     const data = await response.json().catch(() => ({}));
     const status = response.ok ? 'ok' : 'error';
-    logContentTool(toolName, params, data, status, source);
+    logTool(req,toolName, params, data, status, source);
     if (!response.ok) return res.status(response.status).json(data);
     res.json(data);
   } catch (e) {
     const errMsg = e.name === 'AbortError' ? 'Request timeout' : e.message;
-    logContentTool(req.body?.tool_name || '?', req.body, { error: errMsg }, 'error', source);
+    logTool(req,req.body?.tool_name || '?', req.body, { error: errMsg }, 'error', source);
     res.status(500).json({ error: errMsg });
   }
 });

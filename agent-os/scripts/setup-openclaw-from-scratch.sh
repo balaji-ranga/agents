@@ -119,11 +119,11 @@ else
 fi
 
 if [[ "$DOCKER_MODE" -eq 1 ]]; then
-  run_step "7. Docker/production OpenClaw overrides (auth, plugin baseUrl, session visibility)"
+  run_step "7. Docker/production OpenClaw overrides (auth, plugin baseUrl, apiKey, session visibility)"
   node "${AGENT_OS_ROOT}/deploy/scripts/configure-openclaw-docker.js"
 else
-  echo ""
-  echo "=== 7. Docker overrides — skipped (not --docker) ==="
+  run_step "7. Content tools API key (backend/.env ↔ openclaw.json)"
+  node "${AGENT_OS_ROOT}/scripts/ensure-tools-api-key.js"
 fi
 
 run_step "8. Fix Ollama models shape (if needed)"

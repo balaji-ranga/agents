@@ -3,7 +3,7 @@
  */
 import * as store from './agent-workflow-store.js';
 import { getTaskTypeDef } from './agent-workflow-task-catalog.js';
-import { resolveWorkflowForTrigger, enquireWorkflows } from './agent-workflow-chat-tools.js';
+import { parseFailedRunQueryIntent } from './agent-workflow-agent-runs.js';
 
 const NODE_PURPOSE = {
   trigger: 'Entry point — starts runs via manual, chat phrase, schedule, or webhook.',
@@ -279,6 +279,11 @@ export function findWorkflowsReferencedInMessage(ownerUserId, message, { limit =
   const quoted = String(message || '').match(/["']([^"']+)["']/g);
   if (quoted) {
     for (const q of quoted) queries.push(q.replace(/["']/g, '').trim());
+  }
+
+  const failedRunIntent = parseFailedRunQueryIntent(message);
+  if (failedRunIntent?.workflow_query && !queries.includes(failedRunIntent.workflow_query)) {
+    queries.push(failedRunIntent.workflow_query);
   }
 
   const seen = new Set();

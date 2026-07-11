@@ -11,6 +11,8 @@ import {
   listAllAgentsGrouped,
   grantStandardAgents,
 } from '../services/users.js';
+import { sendPlatformNotifications } from '../services/platform-notifications.js';
+import { createSession } from '../services/auth/session.js';
 import { getDb } from '../db/schema.js';
 import { initCeoDb } from '../db/ceo-db.js';
 import { usesTenantCeoDb } from '../db/ceo-db-config.js';
@@ -62,6 +64,29 @@ router.patch('/users/:userId/enabled', (req, res) => {
   }
 });
 
+router.post('/users/:userId/impersonate', (req, res) => {
+  try {
+    const target = getUserById(req.params.userId);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (!target.enabled) return res.status(400).json({ error: 'Cannot impersonate a disabled user' });
+    if (target.id === req.authUser.id) {
+      return res.status(400).json({ error: 'Cannot impersonate yourself' });
+    }
+    const session = createSession(target.id, { impersonatorUserId: req.authUser.id });
+    res.json({
+      user: { ...target, impersonation: { admin_id: req.authUser.id, admin_name: req.authUser.name, admin_email: req.authUser.email } },
+      session,
+      impersonation: {
+        admin_id: req.authUser.id,
+        admin_name: req.authUser.name,
+        admin_email: req.authUser.email,
+      },
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 router.post('/users/:userId/agents/grant-standard', (req, res) => {
   try {
     if (usesTenantCeoDb(req.params.userId)) initCeoDb(req.params.userId);
@@ -93,6 +118,23 @@ router.get('/agents', (req, res) => {
     res.json(listAllAgentsGrouped());
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/notifications', (req, res) => {
+  try {
+    const { title, body, message, link_url, linkUrl, user_ids, userIds, all_users, allUsers } = req.body || {};
+    const result = sendPlatformNotifications({
+      title,
+      body: body ?? message ?? '',
+      linkUrl: link_url ?? linkUrl ?? '',
+      userIds: user_ids ?? userIds ?? [],
+      allUsers: all_users === true || allUsers === true,
+      createdBy: req.authUser.id,
+    });
+    res.status(201).json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
   }
 });
 

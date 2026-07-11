@@ -99,10 +99,16 @@ for (const plugin of REQUIRED_PLUGINS) {
 
 const contentTools = config.plugins?.entries?.['agent-os-content-tools'];
 const baseUrl = contentTools?.config?.baseUrl || process.env.AGENT_OS_INTERNAL_API_URL;
+const apiKey = contentTools?.config?.apiKey || process.env.TOOLS_API_KEY;
 if (!baseUrl) {
   warn('agent-os-content-tools config.baseUrl not set (uses AGENT_OS_API_URL env at runtime)');
 } else if (baseUrl.includes('127.0.0.1') || baseUrl.includes('localhost')) {
   warn(`agent-os-content-tools baseUrl is local (${baseUrl}) — use http://backend:3001 in Docker`);
+}
+if (!apiKey) {
+  fail('agent-os-content-tools config.apiKey / TOOLS_API_KEY not set — run ensure-tools-api-key.js or configure-openclaw-docker.js');
+} else if (process.env.TOOLS_API_KEY && apiKey !== process.env.TOOLS_API_KEY) {
+  fail('agent-os-content-tools config.apiKey does not match TOOLS_API_KEY env — re-run configure-openclaw-docker.js or ensure-tools-api-key.js');
 }
 
 // Global tools.allow

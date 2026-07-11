@@ -53,6 +53,9 @@ export function resolveAuthenticatedCeoUserId(req, body = {}) {
       body?.ceo_user_id ||
       body?.ceoUserId;
     if (imp) return String(imp).trim();
+    const err = new Error('Admin must impersonate a user or specify ceo_user_id');
+    err.status = 403;
+    throw err;
   }
   return legacyResolveCeoUserId(req, body);
 }

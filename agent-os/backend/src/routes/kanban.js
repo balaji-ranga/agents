@@ -9,8 +9,16 @@ import * as openclaw from '../gateway/openclaw.js';
 import { resolveKanbanTaskArtifacts } from '../services/kanban-artifacts.js';
 import { parseAgentWorkflowMeta } from '../services/agent-workflow-kanban.js';
 import { formatServerDateTime, getServerTimezone } from '../utils/format-datetime.js';
+import { attachAuthUser, requireAuth } from '../middleware/auth.js';
+import {
+  filterKanbanTasksForUser,
+  kanbanTaskBelongsToUser,
+  assertKanbanTaskAccess,
+} from '../services/kanban-user-scope.js';
 
 const router = Router();
+router.use(attachAuthUser);
+router.use(requireAuth);
 const VALID_STATUSES = ['open', 'awaiting_confirmation', 'in_progress', 'completed', 'failed'];
 
 function db() {
@@ -81,24 +89,21 @@ router.get('/tasks', (req, res) => {
       LEFT JOIN agents a ON a.id = k.assigned_agent_id
     `;
     const params = [];
-    const ceoReviewAlways =
-      " OR (k.status = 'awaiting_confirmation' AND k.description LIKE 'ceo_review_profile:%')";
-    const workflowAlways =
-      " OR k.description LIKE '[job_pipeline:%' OR k.description LIKE '%[agent_workflow:%' OR k.created_by IN ('job_workflow', 'job_pipeline', 'agent_workflow', 'agent_workflow_ceo')";
     if (range) {
       const startSql = range.start.replace('T', ' ').replace(/\.\d{3}Z$/, '').slice(0, 19);
       const endSql = range.end.replace('T', ' ').replace(/\.\d{3}Z$/, '').slice(0, 19);
-      sql += ` WHERE ((k.created_at >= ? AND k.created_at <= ?)${ceoReviewAlways}${workflowAlways})`;
+      sql += ` WHERE k.created_at >= ? AND k.created_at <= ?`;
       params.push(startSql, endSql);
     }
     sql += ` ORDER BY k.created_at DESC`;
     const limit = Math.min(Number(req.query.limit) || 200, 500);
     sql += ` LIMIT ?`;
-    params.push(limit);
+    params.push(limit * 4);
 
     const rows = db().prepare(sql).all(...params);
+    const scoped = filterKanbanTasksForUser(rows, req.authUser).slice(0, limit);
     const server_timezone = getServerTimezone();
-    const tasks = rows.map((row) => ({
+    const tasks = scoped.map((row) => ({
       ...row,
       created_at_display: formatServerDateTime(row.created_at),
       updated_at_display: row.updated_at ? formatServerDateTime(row.updated_at) : null,
@@ -116,23 +121,30 @@ router.get('/summary', (req, res) => {
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const rows = db()
       .prepare(
-        `SELECT assigned_agent_id, status, COUNT(*) AS count
-         FROM kanban_tasks
-         WHERE created_at >= ? AND assigned_agent_id IS NOT NULL
-         GROUP BY assigned_agent_id, status
-         ORDER BY assigned_agent_id, status`
+        `SELECT k.id, k.title, k.description, k.status, k.assigned_agent_id, k.created_by, k.standup_id,
+                k.agent_delegation_task_id, k.created_at, k.updated_at, k.due_date,
+                a.name AS assigned_agent_name
+         FROM kanban_tasks k
+         LEFT JOIN agents a ON a.id = k.assigned_agent_id
+         WHERE k.created_at >= ? AND k.assigned_agent_id IS NOT NULL
+         ORDER BY k.created_at DESC
+         LIMIT ?`
       )
-      .all(since);
-    const byAgent = {};
-    for (const r of rows) {
-      if (!byAgent[r.assigned_agent_id]) byAgent[r.assigned_agent_id] = { open: 0, awaiting_confirmation: 0, in_progress: 0, completed: 0, failed: 0 };
-      if (VALID_STATUSES.includes(r.status)) byAgent[r.assigned_agent_id][r.status] = r.count;
+      .all(since, 2000);
+    const scoped = filterKanbanTasksForUser(rows, req.authUser);
+    const counts = {};
+    for (const r of scoped) {
+      if (!counts[r.assigned_agent_id]) {
+        counts[r.assigned_agent_id] = { open: 0, awaiting_confirmation: 0, in_progress: 0, completed: 0, failed: 0 };
+      }
+      if (VALID_STATUSES.includes(r.status)) counts[r.assigned_agent_id][r.status] += 1;
     }
+    const byAgent = counts;
     const agentNames = db().prepare('SELECT id, name FROM agents').all();
     const names = Object.fromEntries(agentNames.map((a) => [a.id, a.name]));
     res.json({ since, by_agent: byAgent, agent_names: names });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -141,6 +153,7 @@ router.get('/tasks/:id', (req, res) => {
   try {
     const task = db().prepare('SELECT k.*, a.name AS assigned_agent_name FROM kanban_tasks k LEFT JOIN agents a ON a.id = k.assigned_agent_id WHERE k.id = ?').get(req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    assertKanbanTaskAccess(task, req.authUser);
     const messages = db().prepare('SELECT id, role, content, created_at FROM task_messages WHERE task_id = ? ORDER BY created_at').all(task.id);
     let delegation_prompt = null;
     let delegation_response = null;
@@ -174,7 +187,7 @@ router.get('/tasks/:id', (req, res) => {
       artifact_count,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -194,7 +207,7 @@ router.post('/tasks', (req, res) => {
     const row = db().prepare('SELECT * FROM kanban_tasks ORDER BY id DESC LIMIT 1').get();
     res.status(201).json(row);
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(e.status || 400).json({ error: e.message });
   }
 });
 
@@ -203,6 +216,7 @@ router.patch('/tasks/:id', (req, res) => {
   try {
     const task = db().prepare('SELECT * FROM kanban_tasks WHERE id = ?').get(req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    assertKanbanTaskAccess(task, req.authUser);
     const { status, assigned_agent_id, title, description, due_date } = req.body;
     const updates = [];
     const values = [];
@@ -233,7 +247,7 @@ router.patch('/tasks/:id', (req, res) => {
     const updated = db().prepare('SELECT k.*, a.name AS assigned_agent_name FROM kanban_tasks k LEFT JOIN agents a ON a.id = k.assigned_agent_id WHERE k.id = ?').get(req.params.id);
     res.json(updated);
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(e.status || 400).json({ error: e.message });
   }
 });
 
@@ -242,26 +256,28 @@ router.post('/tasks/:id/reopen', (req, res) => {
   try {
     const task = db().prepare('SELECT * FROM kanban_tasks WHERE id = ?').get(req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    assertKanbanTaskAccess(task, req.authUser);
     db().prepare("UPDATE kanban_tasks SET status = 'open', updated_at = datetime('now') WHERE id = ?").run(req.params.id);
     const updated = db().prepare('SELECT k.*, a.name AS assigned_agent_name FROM kanban_tasks k LEFT JOIN agents a ON a.id = k.assigned_agent_id WHERE k.id = ?').get(req.params.id);
     res.json(updated);
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(e.status || 400).json({ error: e.message });
   }
 });
 
 // DELETE /api/kanban/tasks/:id — delete one task (messages + clear FK then task)
 router.delete('/tasks/:id', (req, res) => {
   try {
-    const task = db().prepare('SELECT id FROM kanban_tasks WHERE id = ?').get(req.params.id);
+    const task = db().prepare('SELECT * FROM kanban_tasks WHERE id = ?').get(req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    assertKanbanTaskAccess(task, req.authUser);
     const id = Number(req.params.id);
     db().prepare('UPDATE kanban_tasks SET standup_id = NULL, agent_delegation_task_id = NULL WHERE id = ?').run(id);
     db().prepare('DELETE FROM task_messages WHERE task_id = ?').run(id);
     db().prepare('DELETE FROM kanban_tasks WHERE id = ?').run(id);
     res.status(204).send();
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -270,25 +286,32 @@ router.delete('/tasks', (req, res) => {
   try {
     const ids = Array.isArray(req.body?.task_ids) ? req.body.task_ids.map((n) => Number(n)).filter((n) => n > 0) : [];
     if (ids.length === 0) return res.status(400).json({ error: 'task_ids array required with at least one id' });
-    const placeholders = ids.map(() => '?').join(',');
-    db().prepare(`UPDATE kanban_tasks SET standup_id = NULL, agent_delegation_task_id = NULL WHERE id IN (${placeholders})`).run(...ids);
-    db().prepare(`DELETE FROM task_messages WHERE task_id IN (${placeholders})`).run(...ids);
-    db().prepare(`DELETE FROM kanban_tasks WHERE id IN (${placeholders})`).run(...ids);
+    const allowed = [];
+    for (const id of ids) {
+      const task = db().prepare('SELECT * FROM kanban_tasks WHERE id = ?').get(id);
+      if (task && kanbanTaskBelongsToUser(task, req.authUser)) allowed.push(id);
+    }
+    if (!allowed.length) return res.status(404).json({ error: 'No accessible tasks found' });
+    const placeholders = allowed.map(() => '?').join(',');
+    db().prepare(`UPDATE kanban_tasks SET standup_id = NULL, agent_delegation_task_id = NULL WHERE id IN (${placeholders})`).run(...allowed);
+    db().prepare(`DELETE FROM task_messages WHERE task_id IN (${placeholders})`).run(...allowed);
+    db().prepare(`DELETE FROM kanban_tasks WHERE id IN (${placeholders})`).run(...allowed);
     res.status(204).send();
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
 // GET /api/kanban/tasks/:id/messages
 router.get('/tasks/:id/messages', (req, res) => {
   try {
-    const task = db().prepare('SELECT id FROM kanban_tasks WHERE id = ?').get(req.params.id);
+    const task = db().prepare('SELECT * FROM kanban_tasks WHERE id = ?').get(req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    assertKanbanTaskAccess(task, req.authUser);
     const rows = db().prepare('SELECT id, role, content, created_at FROM task_messages WHERE task_id = ? ORDER BY created_at').all(req.params.id);
     res.json(rows);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
@@ -297,6 +320,7 @@ router.post('/tasks/:id/messages', async (req, res) => {
   try {
     const task = db().prepare('SELECT id, title, description, status, assigned_agent_id, agent_delegation_task_id FROM kanban_tasks WHERE id = ?').get(req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    assertKanbanTaskAccess(task, req.authUser);
     const { role, content } = req.body;
     const r = (role || 'user').toString().toLowerCase();
     const c = content != null ? (typeof content === 'string' ? content : JSON.stringify(content)) : '';
@@ -346,7 +370,7 @@ router.post('/tasks/:id/messages', async (req, res) => {
 
     res.status(201).json(userRow);
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(e.status || 400).json({ error: e.message });
   }
 });
 
