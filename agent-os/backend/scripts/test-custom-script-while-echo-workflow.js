@@ -99,14 +99,19 @@ async function main() {
 
   const steps = finished.steps || [];
   const scriptStep = steps.find((s) => s.node_id === 'script-1');
-  const whileStep = steps.find((s) => s.node_id === 'while-1');
-  const apiStep = steps.find((s) => s.node_id === 'api-echo');
+  const whileSteps = steps.filter((s) => s.node_id === 'while-1');
+  const apiSteps = steps.filter((s) => s.node_id === 'api-echo');
+  const whileStep = whileSteps[whileSteps.length - 1];
+  const apiStep = apiSteps[apiSteps.length - 1];
 
   assert('custom script step completed', scriptStep?.status === 'completed');
   assert('script used workflow context', /hello-echo-loop|echo_rounds/.test(JSON.stringify(scriptStep?.output || {})));
+  assert('while logged 3 loop iterations', whileSteps.filter((s) => s.output?.branch === 'loop').length === 3);
+  assert('while logged exit step', whileSteps.some((s) => s.output?.branch === 'exit'));
   assert('while completed and exited', whileStep?.status === 'completed');
   assert('while ran 3 echo iterations', whileStep?.output?.iterations === 3, JSON.stringify(whileStep?.output));
   assert('while took exit branch', whileStep?.output?.branch === 'exit' || whileStep?.output?.text === 'exit');
+  assert('echo API logged 3 step rows', apiSteps.length === 3);
   assert('echo API step completed', apiStep?.status === 'completed');
   assert('API returned 2xx', apiStep?.output?.status === 200 || apiStep?.output?.ok === true);
 

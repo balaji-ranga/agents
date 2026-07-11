@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { formatLocalDateTime } from '../utils/formatDateTime.js';
 import { api } from '../api.js';
@@ -276,6 +276,13 @@ export default function AgentWorkflows() {
   };
 
   const listeningSteps = (selectedRun?.steps || []).filter((s) => s.status === 'listening');
+  const stepRepeatCounts = useMemo(() => {
+    const counts = {};
+    for (const step of selectedRun?.steps || []) {
+      counts[step.node_id] = (counts[step.node_id] || 0) + 1;
+    }
+    return counts;
+  }, [selectedRun?.steps]);
 
   const pauseAllRuns = () => {
     if (!confirmAction('Pause all active workflow runs? Kanban tasks for those runs will be cleared.')) return;
@@ -601,7 +608,11 @@ export default function AgentWorkflows() {
                     <>
                       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                         <span>
-                          {s.node_label || s.node_id} <small>({s.node_type})</small>
+                          {s.node_label || s.node_id}
+                          {(stepRepeatCounts[s.node_id] || 0) > 1 ? (
+                            <small style={{ color: 'var(--muted)' }}> #{s.iteration ?? 1}</small>
+                          ) : null}{' '}
+                          <small>({s.node_type})</small>
                         </span>
                         <StatusBadge status={s.status} />
                       </div>

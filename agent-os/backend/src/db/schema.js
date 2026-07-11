@@ -500,6 +500,12 @@ export function initDb() {
     _db.exec(`ALTER TABLE agent_workflow_definitions ADD COLUMN webhook_secret TEXT`);
   } catch (_) {}
   try {
+    _db.exec(`ALTER TABLE agent_workflow_run_steps ADD COLUMN iteration INTEGER DEFAULT 1`);
+  } catch (_) {}
+  try {
+    _db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_wf_steps_run_node_iter ON agent_workflow_run_steps(run_id, node_id, iteration)`);
+  } catch (_) {}
+  try {
     _db.exec(`
       CREATE TABLE IF NOT EXISTS agent_workflow_pending_listeners (
         run_id INTEGER NOT NULL,

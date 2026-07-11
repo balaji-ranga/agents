@@ -122,6 +122,45 @@ function isWhileLoopBodyNode(graph, nodeId) {
   });
 }
 
+function getUpstreamWhileNode(graph, nodeId) {
+  for (const edge of getIncomingEdges(graph, nodeId)) {
+    const src = getNode(graph, edge.source);
+    if (src?.type === 'while' && (edge.sourceHandle || 'default') === 'loop') return src;
+  }
+  return null;
+}
+
+function getLatestStepRow(runId, nodeId) {
+  return db()
+    .prepare(
+      `SELECT id, status, iteration FROM agent_workflow_run_steps
+       WHERE run_id = ? AND node_id = ? ORDER BY id DESC LIMIT 1`
+    )
+    .get(runId, nodeId);
+}
+
+function getStepRowForIteration(runId, nodeId, iteration) {
+  return db()
+    .prepare(
+      `SELECT id, status FROM agent_workflow_run_steps
+       WHERE run_id = ? AND node_id = ? AND iteration = ?`
+    )
+    .get(runId, nodeId, iteration);
+}
+
+function resolveLoopStepIteration(node, graph, context) {
+  if (node.type === 'while') {
+    const prev = context.while_loops?.[node.id] || 0;
+    return prev + 1;
+  }
+  const whileNode = getUpstreamWhileNode(graph, node.id);
+  if (whileNode) return context.while_loops?.[whileNode.id] || 1;
+  return 1;
+}
+
+/** Set during executeNode so upsertStep can append per-iteration rows for while loops. */
+let activeStepMeta = null;
+
 function allPredecessorsComplete(runId, graph, nodeId) {
   const incoming = getIncomingEdges(graph, nodeId);
   if (!incoming.length) return true;
@@ -138,9 +177,7 @@ function allPredecessorsComplete(runId, graph, nodeId) {
   }
 
   for (const edge of incoming) {
-    const step = db()
-      .prepare(`SELECT status FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`)
-      .get(runId, edge.source);
+    const step = getLatestStepRow(runId, edge.source);
     if (!step) {
       if (loopBackSources?.has(edge.source)) continue;
       return false;
@@ -178,17 +215,30 @@ function buildStepOutputRecord(outputs) {
 }
 
 function upsertStep(runId, node, status, extra = {}) {
-  const existing = db()
-    .prepare(`SELECT id FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`)
-    .get(runId, node.id);
   const label = node.data?.label || node.id;
+  const meta = activeStepMeta || {};
+  const graph = meta.graph;
+  const context = meta.context;
+  const isWhile = node.type === 'while';
+  const isLoopBody = graph ? isWhileLoopBodyNode(graph, node.id) : false;
+  const appendOnly = isWhile || isLoopBody;
+  const iteration = appendOnly
+    ? (extra.iteration ?? resolveLoopStepIteration(node, graph, context))
+    : 1;
+
+  const existing = appendOnly
+    ? getStepRowForIteration(runId, node.id, iteration)
+    : db()
+        .prepare(`SELECT id FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ? AND iteration = 1`)
+        .get(runId, node.id);
+
   if (existing) {
     db()
       .prepare(
         `UPDATE agent_workflow_run_steps SET status = ?, node_label = ?, input_json = COALESCE(?, input_json),
          output_json = COALESCE(?, output_json), delegation_task_id = COALESCE(?, delegation_task_id),
          kanban_task_id = COALESCE(?, kanban_task_id), started_at = COALESCE(started_at, datetime('now')),
-         completed_at = ?, error_message = ?, node_type = ?
+         completed_at = ?, error_message = ?, node_type = ?, iteration = ?
          WHERE id = ?`
       )
       .run(
@@ -201,6 +251,7 @@ function upsertStep(runId, node, status, extra = {}) {
         ['completed', 'failed', 'skipped'].includes(status) ? new Date().toISOString() : null,
         extra.error_message ?? null,
         node.type,
+        iteration,
         existing.id
       );
     updateRunProgress(runId);
@@ -209,8 +260,8 @@ function upsertStep(runId, node, status, extra = {}) {
   db()
     .prepare(
       `INSERT INTO agent_workflow_run_steps (run_id, node_id, node_type, node_label, status, input_json, output_json,
-       delegation_task_id, kanban_task_id, started_at, completed_at, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)`
+       delegation_task_id, kanban_task_id, started_at, completed_at, error_message, iteration)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)`
     )
     .run(
       runId,
@@ -223,7 +274,8 @@ function upsertStep(runId, node, status, extra = {}) {
       extra.delegation_task_id ?? null,
       extra.kanban_task_id ?? null,
       ['completed', 'failed', 'skipped'].includes(status) ? new Date().toISOString() : null,
-      extra.error_message ?? null
+      extra.error_message ?? null,
+      iteration
     );
   const stepId = db().prepare('SELECT id FROM agent_workflow_run_steps ORDER BY id DESC LIMIT 1').get()?.id;
   updateRunProgress(runId);
@@ -403,23 +455,32 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
 
   if (!allPredecessorsComplete(runId, graph, nodeId)) return;
 
-  const existing = db()
-    .prepare(`SELECT status FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`)
-    .get(runId, nodeId);
+  const prevStepMeta = activeStepMeta;
+  activeStepMeta = { graph, context };
+
   const dispatch = context._event_dispatch;
   const eventBranchIds = dispatch ? getDownstreamNodeIds(graph, dispatch.listenNodeId) : new Set();
   const isEventBranch = dispatch && eventBranchIds.has(nodeId);
   const isListenType = node.type === 'sse_listen' || node.type === 'mcp_listen';
   const isLoopBody = isWhileLoopBodyNode(graph, nodeId);
   const allowRerun = node.type === 'while' || isEventBranch || isLoopBody;
-  if (existing && ['completed', 'in_progress', 'failed'].includes(existing.status) && !allowRerun) return;
+  const latest = getLatestStepRow(runId, nodeId);
+  const loopIteration = allowRerun && (node.type === 'while' || isLoopBody)
+    ? resolveLoopStepIteration(node, graph, context)
+    : 1;
+  const existing = allowRerun && (node.type === 'while' || isLoopBody)
+    ? getStepRowForIteration(runId, nodeId, loopIteration)
+    : latest;
+
+  try {
+  if (latest && ['completed', 'in_progress', 'failed'].includes(latest.status) && !allowRerun) return;
   if (existing && isEventBranch && !isListenType) {
     db().prepare(`DELETE FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`).run(runId, nodeId);
   }
-  if (existing && isLoopBody && existing.status === 'completed') {
-    db().prepare(`DELETE FROM agent_workflow_run_steps WHERE run_id = ? AND node_id = ?`).run(runId, nodeId);
+  if (existing && ['completed', 'in_progress'].includes(existing.status) && (node.type === 'while' || isLoopBody)) {
+    return;
   }
-  if (existing && existing.status === 'in_progress' && node.type !== 'ceo_approval' && !isListenType) return;
+  if (latest && latest.status === 'in_progress' && node.type !== 'ceo_approval' && !isListenType && !allowRerun) return;
 
   if (node.type === 'parallel') {
     upsertStep(runId, node, 'completed', { output: { parallel: true } });
@@ -469,6 +530,7 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
       upsertStep(runId, node, 'completed', {
         input: { condition: cond, iteration: context.while_loops[node.id] },
         output: buildStepOutputRecord(outputs),
+        iteration: context.while_loops[node.id],
       });
       updateRunProgress(runId);
       await advanceFromNode(runId, nodeId, 'loop');
@@ -479,6 +541,7 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
       upsertStep(runId, node, 'completed', {
         input: { condition: cond, iteration: prev },
         output: buildStepOutputRecord(outputs),
+        iteration: prev + 1,
       });
       updateRunProgress(runId);
       await advanceFromNode(runId, nodeId, 'exit');
@@ -973,6 +1036,9 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
 
   upsertStep(runId, node, 'skipped');
   await advanceFromNode(runId, nodeId);
+  } finally {
+    activeStepMeta = prevStepMeta;
+  }
 }
 
 /**
