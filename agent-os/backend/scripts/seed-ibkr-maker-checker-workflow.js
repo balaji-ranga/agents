@@ -45,7 +45,7 @@ Checker feedback is also injected at the TOP of the user message when present.
 - Do not repeat the same plan with only cosmetic note changes.
 - If a Checker request conflicts with hard constraints (allowlist-only, order_learnings avoid_hints, cash/budget): keep the constraint, explain why in notes, and still improve what you can (justification quality, residual reasons, sizing).
 - An empty trades[] day is valid when allowlist names are blocked by order_learnings / IB system cancels — say so explicitly in notes and residual.
-- Honor BRAIN HISTORY (prior maker/checker summaries) in the user message — do not repeat past reject patterns.
+- Honor BRAIN HISTORY (prior maker/checker summaries) and ORDER HISTORY (summarized cancels/fills) in the user message — do not repeat past reject / IB system-cancel patterns.
 
 You MAY pick a SUBSET of the allowlist — do NOT feel obliged to trade every name.
 Prefer 1–3 best ideas that fit cash + budget. Put overflow ideas in residual.
@@ -64,7 +64,7 @@ Hard constraints:
 - BUY entry ≤ reference_price + {{var.entry_slip_pct_max}}%
 - Respect cash/positions/pending sells/reference_prices from account snapshot in the user message
 - When snapshot.reference_prices[key].reference_price is present, USE it as reference_price (do not invent)
-- Read snapshot.order_learnings (last 30d): honor avoid_hints and summary_bullets — do not repeat IB system cancels (e.g. paper crypto/PAXOS unavailable, margin calc unsupported)
+- Read ORDER HISTORY (summarized) and any snapshot.order_learnings: honor avoid hints — do not repeat IB system cancels (e.g. paper crypto/PAXOS unavailable, margin calc unsupported)
 - If already long a name, do not BUY again; use SELL_TO_CLOSE only to exit
 - If an SGX board lot does not fit budget, skip that name and use other allowlist markets
 
@@ -104,10 +104,10 @@ Latest Checker adjustments (may be empty on first pass): {{parse-checker.adjustm
 const CHECKER_PROMPT = `You are the Checker (risk reviewer). Output ONLY valid JSON:
 {"decision":"approved"|"rejected","adjustments":"...","notes":"..."}
 
-The Maker plan is in the user message (not only here). Also use any order_learnings / snapshot excerpts in the user message.
+The Maker plan is in the user message (not only here). Also use ORDER HISTORY / snapshot excerpts in the user message.
 
 Approve when:
-- trades[] is empty AND notes/residual clearly cite snapshot.order_learnings / prior IB system cancels (e.g. paper PAXOS unavailable, margin calc unsupported) — valid informed no-trade day
+- trades[] is empty AND notes/residual clearly cite ORDER HISTORY / prior IB system cancels (e.g. paper PAXOS unavailable, margin calc unsupported) — valid informed no-trade day
 - OR each BUY has solid thesis/risks/why_now and respects allowlist {{var.allowlist_keys}}, cash, stops, and learnings
 
 Reject if:
@@ -232,6 +232,33 @@ export function buildIbkrMakerCheckerGraph({ parseScriptId = PARSE_SCRIPT_ID } =
         },
       },
       {
+        id: 'api-order-history',
+        type: 'api',
+        position: { x: 820, y: 120 },
+        data: {
+          label: 'Order history (summarized)',
+          inputBindings: [
+            { id: 'url', mode: 'static', value: `${backendBase}/api/ibkr-trading/order-learnings` },
+            {
+              id: 'body',
+              mode: 'static',
+              value: JSON.stringify({
+                days: '{{var.order_history_days}}',
+                response_type: 'summarized',
+                limit: 40,
+                purpose: 'IBKR day-plan Maker learning from prior order cancels/fills/rejects',
+              }).replace('"{{var.order_history_days}}"', '{{var.order_history_days}}'),
+            },
+            {
+              id: 'headers',
+              mode: 'static',
+              value: JSON.stringify({ 'Content-Type': 'application/json', 'x-internal-test': '1' }),
+            },
+          ],
+          taskConfig: { method: 'POST', authType: 'none', timeoutMs: 120000 },
+        },
+      },
+      {
         id: 'while-checker',
         type: 'while',
         position: { x: 900, y: 120 },
@@ -257,7 +284,7 @@ export function buildIbkrMakerCheckerGraph({ parseScriptId = PARSE_SCRIPT_ID } =
               id: 'userMessage',
               mode: 'static',
               value:
-                '=== CHECKER FEEDBACK (address every point on retries; empty on first pass) ===\n{{parse-checker.adjustments}}\n\n=== BRAIN HISTORY (prior maker/checker learnings, summarized) ===\n{{api-brain-history.body.context_text}}\n\n=== ACCOUNT SNAPSHOT (cash, positions, open orders, order_learnings) ===\n{{api-snapshot.bodyText}}\n\n=== RUN REQUEST ===\n{{input}}',
+                '=== CHECKER FEEDBACK (address every point on retries; empty on first pass) ===\n{{parse-checker.adjustments}}\n\n=== BRAIN HISTORY (prior maker/checker learnings, summarized) ===\n{{api-brain-history.body.context_text}}\n\n=== ORDER HISTORY (prior cancels/fills/rejects, summarized) ===\n{{api-order-history.body.context_text}}\n\n=== ACCOUNT SNAPSHOT (cash, positions, open orders) ===\n{{api-snapshot.bodyText}}\n\n=== RUN REQUEST ===\n{{input}}',
             },
           ],
           taskConfig: {
@@ -286,7 +313,7 @@ export function buildIbkrMakerCheckerGraph({ parseScriptId = PARSE_SCRIPT_ID } =
               id: 'userMessage',
               mode: 'static',
               value:
-                '=== MAKER PLAN (JSON) ===\n{{maker-1.text}}\n\n=== ORDER LEARNINGS (honor these; do not demand blocked symbols) ===\n{{api-snapshot.order_learnings}}\n\n=== ALLOWLIST KEYS ===\n{{var.allowlist_keys}}',
+                '=== MAKER PLAN (JSON) ===\n{{maker-1.text}}\n\n=== ORDER HISTORY (honor these; do not demand blocked symbols) ===\n{{api-order-history.body.context_text}}\n\n=== ALLOWLIST KEYS ===\n{{var.allowlist_keys}}',
             },
           ],
           taskConfig: {
@@ -456,7 +483,8 @@ export function buildIbkrMakerCheckerGraph({ parseScriptId = PARSE_SCRIPT_ID } =
       { id: 'e2', source: 'api-snapshot', target: 'api-preflight' },
       { id: 'e3', source: 'api-preflight', target: 'if-preflight' },
       { id: 'e4', source: 'if-preflight', target: 'api-brain-history', sourceHandle: 'true' },
-      { id: 'e4b', source: 'api-brain-history', target: 'while-checker' },
+      { id: 'e4b', source: 'api-brain-history', target: 'api-order-history' },
+      { id: 'e4c', source: 'api-order-history', target: 'while-checker' },
       { id: 'e5', source: 'if-preflight', target: 'brain-reject', sourceHandle: 'false' },
       { id: 'e6', source: 'while-checker', target: 'maker-1', sourceHandle: 'loop' },
       { id: 'e7', source: 'maker-1', target: 'checker-1' },

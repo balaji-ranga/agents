@@ -89,6 +89,7 @@ export const IBKR_DAY_PLAN_VARIABLES = withDerivedAllowlistKeys({
   no_margin: true,
   sgd_usd_rate: 0.74,
   brain_history_days: 7,
+  order_history_days: 7,
 });
 
 export const IBKR_POLLER_VARIABLES = withDerivedAllowlistKeys({
@@ -110,4 +111,5 @@ export const IBKR_POLLER_VARIABLES = withDerivedAllowlistKeys({
   no_margin: true,
   sgd_usd_rate: 0.74,
   brain_history_days: 7,
+  order_history_days: 7,
 });

@@ -4,6 +4,12 @@
  */
 import { getDb } from './schema.js';
 import { writeOpenClawToolsList } from '../services/content-tools-meta.js';
+import {
+  getAgentToolGrants,
+  syncAllowlistsFile,
+  syncOpenClawJsonForAgent,
+  writeAgentToolsMd,
+} from '../services/openclaw-agent-tools.js';
 
 export const IBKR_TRADING_TOOLS = [
   {
@@ -149,6 +155,50 @@ export const IBKR_TRADING_TOOLS = [
     enabled: 1,
     is_builtin: 0,
   },
+  {
+    name: 'ibkr_portfolio_analytics',
+    display_name: 'IBKR Portfolio Analytics',
+    endpoint: '/api/ibkr-trading/analytics/summary',
+    method: 'POST',
+    purpose:
+      'Entitled portfolio summary for the logged-in CEO: budget, live cash/positions, fills count, realized/unrealized PnL, pending deposit-like cash events. Body optional: { "days": 30, "include_live": true }. Owner is always the session user.',
+    model_used: '',
+    enabled: 1,
+    is_builtin: 0,
+  },
+  {
+    name: 'ibkr_fills_history',
+    display_name: 'IBKR Fills History',
+    endpoint: '/api/ibkr-trading/analytics/fills',
+    method: 'GET',
+    purpose:
+      'List durable fill records for the session owner. Query: days, limit, symbol_key.',
+    model_used: '',
+    enabled: 1,
+    is_builtin: 0,
+  },
+  {
+    name: 'ibkr_pnl',
+    display_name: 'IBKR P&L',
+    endpoint: '/api/ibkr-trading/analytics/pnl',
+    method: 'GET',
+    purpose:
+      'Realized P&L rows + unrealized from last position snapshot for the session owner. Query: days, limit.',
+    model_used: '',
+    enabled: 1,
+    is_builtin: 0,
+  },
+  {
+    name: 'ibkr_cash_events',
+    display_name: 'IBKR Cash Events',
+    endpoint: '/api/ibkr-trading/analytics/cash-events',
+    method: 'GET',
+    purpose:
+      'Cash balance snapshots and inferred inflow/outflow (pending_review) for the session owner. Query: days, limit, pending_only=1.',
+    model_used: '',
+    enabled: 1,
+    is_builtin: 0,
+  },
 ];
 
 /** Sample bodies for Content tools UI Test panel. */
@@ -180,7 +230,28 @@ export const IBKR_DEFAULT_TEST_BODIES = {
   ibkr_release: { reservation_id: 0, reason: 'ui-test' },
   ibkr_confirm_fill: { reservation_id: 0 },
   ibkr_place: { trades: [], dry_run: true, residual: [] },
+  ibkr_portfolio_analytics: { days: 30, include_live: false },
+  ibkr_fills_history: {},
+  ibkr_pnl: {},
+  ibkr_cash_events: {},
 };
+
+export const IBKR_ANALYTICS_TOOL_NAMES = [
+  'ibkr_portfolio_analytics',
+  'ibkr_fills_history',
+  'ibkr_pnl',
+  'ibkr_cash_events',
+];
+
+/** Read-only IBKR tools useful for COO chat (analytics + status). */
+export const IBKR_COO_TOOL_NAMES = [
+  ...IBKR_ANALYTICS_TOOL_NAMES,
+  'ibkr_gateway_ping',
+  'ibkr_config',
+  'ibkr_day_status',
+  'ibkr_account_snapshot',
+  'ibkr_preflight',
+];
 
 export function seedIbkrTradingToolsIfMissing() {
   const db = getDb();
@@ -196,4 +267,32 @@ export function seedIbkrTradingToolsIfMissing() {
     upd.run(t.purpose, t.display_name, t.endpoint, t.method, t.name);
   }
   writeOpenClawToolsList();
+  grantIbkrToolsToCoo();
+}
+
+/** Grant IBKR analytics (+ read status) tools to COO without wiping other grants. */
+export function grantIbkrToolsToCoo(agentId = 'balserve') {
+  const db = getDb();
+  const agent = db.prepare('SELECT * FROM agents WHERE id = ? OR openclaw_agent_id = ?').get(agentId, agentId);
+  if (!agent) {
+    console.warn(`[ibkr-tools] skip COO grant — agent ${agentId} not found`);
+    return { granted: [], agent_id: null };
+  }
+  const ins = db.prepare(
+    'INSERT OR IGNORE INTO agent_tool_grants (agent_id, tool_name) VALUES (?, ?)'
+  );
+  let added = 0;
+  for (const name of IBKR_COO_TOOL_NAMES) {
+    const info = ins.run(agent.id, name);
+    if (info.changes) added += 1;
+  }
+  try {
+    syncAllowlistsFile();
+    syncOpenClawJsonForAgent(agent);
+    writeAgentToolsMd(agent, getAgentToolGrants(agent.id)).catch(() => {});
+  } catch (e) {
+    console.warn('[ibkr-tools] COO allowlist sync:', e?.message || e);
+  }
+  if (added) console.log(`[ibkr-tools] granted ${added} IBKR tool(s) to ${agent.id}`);
+  return { granted: IBKR_COO_TOOL_NAMES, agent_id: agent.id, added };
 }

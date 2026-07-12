@@ -4,6 +4,8 @@
 import * as store from './agent-workflow-store.js';
 import { getTaskTypeDef } from './agent-workflow-task-catalog.js';
 import { parseFailedRunQueryIntent } from './agent-workflow-agent-runs.js';
+import { resolveWorkflowForTrigger, enquireWorkflows } from './agent-workflow-chat-tools.js';
+import { isCronDue } from './agent-workflow-scheduler.js';
 
 const NODE_PURPOSE = {
   trigger: 'Entry point — starts runs via manual, chat phrase, schedule, or webhook.',
@@ -205,6 +207,118 @@ export function formatWorkflowDescriptionReply(def) {
     .map((n) => `\`${n.type}\``)
     .join(', ');
   return `${block}\n\n**Summary:** This workflow has exactly ${buildDetailedGraphSummary(def.status === 'published' && def.published_graph ? def.published_graph : def.draft_graph).node_count} node(s): ${types || '(none)'}. No other nodes exist in the stored graph.`;
+}
+
+/** Next minute (inclusive of +1) that matches the cron expression, or null. */
+export function getNextCronFireAt(expression, from = new Date(), { maxMinutes = 60 * 24 * 8 } = {}) {
+  const cronExpr = String(expression || '').trim();
+  if (!cronExpr) return null;
+  // Walk forward one minute at a time using the same matcher as the scheduler tick.
+  const cursor = new Date(from.getTime());
+  cursor.setSeconds(0, 0);
+  cursor.setMinutes(cursor.getMinutes() + 1);
+  for (let i = 0; i < maxMinutes; i++) {
+    if (isCronDue(cronExpr, cursor)) return new Date(cursor.getTime());
+    cursor.setMinutes(cursor.getMinutes() + 1);
+  }
+  return null;
+}
+
+export function parseScheduleQueryIntent(message) {
+  const t = String(message || '').trim();
+  if (!t) return null;
+
+  const asksSchedule =
+    /next\s+(?:trigger|schedule|run|fire|execution)/i.test(t) ||
+    /(?:when|what(?:'s| is))\s+(?:the\s+)?(?:next\s+)?(?:trigger|schedule|cron|run)/i.test(t) ||
+    /(?:schedule|cron)\s+(?:time|expression|next)/i.test(t) ||
+    /trigger\s+schedule\s+time/i.test(t);
+
+  if (!asksSchedule) return null;
+
+  const ref = extractWorkflowReferenceFromMessage(t);
+  let workflow_query = ref.name || ref.workflow_id || null;
+
+  if (!workflow_query) {
+    const m =
+      t.match(/(?:for|of|on)\s+(?:the\s+)?(?:workflow\s+)?[`"']?([a-z0-9][a-z0-9_-]*)[`"']?/i) ||
+      t.match(/id\s*[:：]\s*([a-z0-9][a-z0-9_-]*)/i);
+    if (m?.[1]) workflow_query = m[1];
+  }
+
+  return {
+    workflow_query: workflow_query || t,
+    workflow_id: ref.workflow_id || null,
+  };
+}
+
+export function formatScheduleReply(def, { now = new Date() } = {}) {
+  const cronExpr = String(def.schedule_cron || '').trim();
+  const modes = def.trigger_modes || [];
+  const registry = store.listScheduleRegistryRows().find((r) => r.definition_id === def.id);
+  const inRegistry = !!(registry && Number(registry.enabled) !== 0);
+  const next = cronExpr ? getNextCronFireAt(cronExpr, now) : null;
+
+  const lines = [
+    `### Schedule for **${def.name}** (\`${def.id}\`)`,
+    `- Status: ${def.status}${def.paused ? ' (PAUSED)' : ''}`,
+    `- Trigger modes: ${modes.join(', ') || '(none)'}`,
+    `- Cron: \`${cronExpr || '(none)'}\``,
+    `- In central schedule registry: ${inRegistry ? 'yes' : 'no'}`,
+  ];
+
+  if (def.paused) {
+    lines.push('- Next trigger: none — workflow is paused');
+  } else if (!modes.includes('schedule')) {
+    lines.push('- Next trigger: none — `schedule` mode is not enabled');
+  } else if (!cronExpr) {
+    lines.push('- Next trigger: none — no cron expression set');
+  } else if (def.status !== 'published') {
+    lines.push(`- Next trigger: none — status is \`${def.status}\` (must be published)`);
+  } else if (!inRegistry) {
+    lines.push('- Next trigger: none — not registered in the scheduler (publish + schedule mode required)');
+  } else if (!next) {
+    lines.push('- Next trigger: could not compute within 8 days (check cron expression)');
+  } else {
+    lines.push(`- Next trigger (server local): **${next.toString()}**`);
+    lines.push(`- Next trigger (ISO): \`${next.toISOString()}\``);
+  }
+
+  lines.push(
+    '',
+    '_Scheduler ticks every minute and fires when the cron matches that minute._'
+  );
+  return lines.join('\n');
+}
+
+export function tryScheduleQueryResponse(ownerUserId, workflowId, message) {
+  const intent = parseScheduleQueryIntent(message);
+  if (!intent) return null;
+
+  let def =
+    resolveDefinitionByReference(ownerUserId, intent) ||
+    (workflowId ? store.getDefinition(workflowId, ownerUserId) : null);
+
+  if (!def && intent.workflow_query) {
+    const { matches } = enquireWorkflows(ownerUserId, intent.workflow_query, { limit: 1 });
+    if (matches[0]) def = store.getDefinition(matches[0].id, ownerUserId);
+  }
+
+  if (!def) {
+    return {
+      reply: `No workflow matched "${intent.workflow_query}". Use exact name or id.`,
+      workflow_id: workflowId,
+      actions: [],
+    };
+  }
+
+  return {
+    reply: formatScheduleReply(def),
+    workflow_id: def.id,
+    workflow: def,
+    actions: [],
+    modelUsed: null,
+  };
 }
 
 export function parseDescribeWorkflowIntent(message) {

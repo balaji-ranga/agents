@@ -46,6 +46,7 @@ import {
   findWorkflowsReferencedInMessage,
   formatWorkflowDescriptionBlock,
   tryDescribeWorkflowResponse,
+  tryScheduleQueryResponse,
 } from './agent-workflow-agent-describe.js';
 import {
   formatRunFailureReply,
@@ -238,7 +239,14 @@ function buildUserContext({ workflowId, ownerUserId, message }) {
 
   }
 
-  const referenced = findWorkflowsReferencedInMessage(ownerUserId, message);
+  const referenced = (() => {
+    try {
+      return findWorkflowsReferencedInMessage(ownerUserId, message);
+    } catch (e) {
+      console.warn('[workflow-agent] findWorkflowsReferencedInMessage:', e.message);
+      return [];
+    }
+  })();
   if (referenced.length) {
     parts.push(
       '\n## Referenced workflow details (AUTHORITATIVE — describe ONLY these nodes; do not invent Brain/MCP/agent nodes not listed)'
@@ -684,6 +692,26 @@ export async function runWorkflowBuilderChat({
   }
 
 
+
+  const scheduleResult = tryScheduleQueryResponse(ownerUserId, workflowId, trimmed);
+  if (scheduleResult) {
+    const assistantText = scheduleResult.reply;
+    if (persist) {
+      appendWorkflowChatExchange(ownerUserId, scheduleResult.workflow_id || workflowId, trimmed, assistantText);
+    }
+    return {
+      ...buildChatResultPayload({
+        reply: assistantText,
+        modelUsed: null,
+        effectiveWorkflowId: scheduleResult.workflow_id || workflowId,
+        workflow: scheduleResult.workflow,
+        result: null,
+        workflowTriggered: null,
+      }),
+      reply: assistantText,
+      thread_workflow_id: workflowChatThreadKey(scheduleResult.workflow_id || workflowId),
+    };
+  }
 
   const describeResult = tryDescribeWorkflowResponse(ownerUserId, workflowId, trimmed);
   if (describeResult) {

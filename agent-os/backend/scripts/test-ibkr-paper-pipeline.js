@@ -84,7 +84,7 @@ if (!val.ok || !val.trades_to_place?.length) {
   process.exit(1);
 }
 
-const place = ledger.recordPlaceAttempt(owner, val.trades_to_place, { dryRun: true });
+const place = await ledger.recordPlaceAttempt(owner, val.trades_to_place, { dryRun: true });
 console.log('\n3) dry-run place', {
   ok: place.ok,
   dry_run: place.dry_run,

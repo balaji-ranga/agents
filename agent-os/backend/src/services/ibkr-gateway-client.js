@@ -164,11 +164,14 @@ function watchOrderTerminal(ib, orderIds, { watchMs = 8000 } = {}) {
           terminal_reason_code: 'ib_system_cancel',
         });
       } else if (/Filled/i.test(st) && Number(remaining) === 0) {
+        const avg = avgFillPrice != null ? Number(avgFillPrice) : lastFillPrice != null ? Number(lastFillPrice) : null;
         finish({
           terminal_cancelled: false,
           terminal_status: 'Filled',
           terminal_reason_text: 'Filled during post-ack watch',
           terminal_reason_code: 'filled',
+          avg_fill_price: Number.isFinite(avg) ? avg : null,
+          filled_qty: filled != null ? Number(filled) : null,
         });
       }
     };
@@ -586,24 +589,60 @@ export async function fetchAccountSnapshot({ timeoutMs = 90000, allowlist = null
       const positions = [];
       const openOrders = [];
 
-      await new Promise((resolve, reject) => {
-        const reqId = 9101;
-        const t = setTimeout(() => reject(new Error('accountSummary timeout')), 20000);
-        const onSum = (id, acct, tag, value, currency) => {
-          if (id !== reqId) return;
-          summary[tag] = { value, currency, account: acct };
-        };
-        const onEnd = (id) => {
-          if (id !== reqId) return;
-          clearTimeout(t);
-          ib.off(EventName.accountSummary, onSum);
-          ib.off(EventName.accountSummaryEnd, onEnd);
-          resolve();
-        };
-        ib.on(EventName.accountSummary, onSum);
-        ib.on(EventName.accountSummaryEnd, onEnd);
-        ib.reqAccountSummary(reqId, 'All', 'TotalCashValue,AvailableFunds,NetLiquidation,BuyingPower');
-      });
+      let summaryWarning = null;
+      await (async () => {
+        const tags = 'TotalCashValue,AvailableFunds,NetLiquidation,BuyingPower';
+        let lastErr = null;
+        for (let attempt = 0; attempt < 1; attempt++) {
+          const reqId = 9101 + attempt;
+          try {
+            await new Promise((resolve, reject) => {
+              const t = setTimeout(() => reject(new Error('accountSummary timeout')), 10000);
+              const onSum = (id, acct, tag, value, currency) => {
+                if (id !== reqId) return;
+                summary[tag] = { value, currency, account: acct };
+              };
+              const onEnd = (id) => {
+                if (id !== reqId) return;
+                clearTimeout(t);
+                ib.off(EventName.accountSummary, onSum);
+                ib.off(EventName.accountSummaryEnd, onEnd);
+                resolve();
+              };
+              ib.on(EventName.accountSummary, onSum);
+              ib.on(EventName.accountSummaryEnd, onEnd);
+              try {
+                ib.reqAccountSummary(reqId, 'All', tags);
+              } catch (e) {
+                clearTimeout(t);
+                ib.off(EventName.accountSummary, onSum);
+                ib.off(EventName.accountSummaryEnd, onEnd);
+                reject(e);
+              }
+            });
+            try {
+              ib.cancelAccountSummary(reqId);
+            } catch {
+              /* ignore */
+            }
+            lastErr = null;
+            break;
+          } catch (e) {
+            lastErr = e;
+            try {
+              ib.cancelAccountSummary(reqId);
+            } catch {
+              /* ignore */
+            }
+            await new Promise((r) => setTimeout(r, 1200));
+          }
+        }
+        if (lastErr) {
+          // Soft-fail: positions/orders still useful for Maker; cash falls back below.
+          summaryWarning = lastErr.message || String(lastErr);
+          console.warn('[ibkr] accountSummary soft-fail:', summaryWarning);
+        }
+      })();
 
       await new Promise((resolve) => {
         const t = setTimeout(resolve, 10000);
@@ -676,12 +715,31 @@ export async function fetchAccountSnapshot({ timeoutMs = 90000, allowlist = null
       }
 
       const pendingSells = openOrders.filter((o) => String(o.action).toUpperCase() === 'SELL');
-      const cashUsd = cashFromSummary(summary);
+      let cashUsd = cashFromSummary(summary);
+      if (cashUsd == null) {
+        try {
+          const { listCashEvents, ensureIbkrAnalyticsTables } = await import('./ibkr-analytics.js');
+          ensureIbkrAnalyticsTables();
+          // owner not always known here — use last global balance only if single-tenant paper
+          const { getDb } = await import('../db/schema.js');
+          const last = getDb()
+            .prepare(
+              `SELECT balance_usd FROM ibkr_cash_events
+               WHERE balance_usd IS NOT NULL
+               ORDER BY event_at DESC, id DESC LIMIT 1`
+            )
+            .get();
+          if (last?.balance_usd != null) cashUsd = Number(last.balance_usd);
+        } catch {
+          /* ignore */
+        }
+      }
       return {
         ok: true,
         account,
         cash_usd: cashUsd,
         summary,
+        summary_warning: summaryWarning || null,
         positions,
         open_orders: openOrders,
         pending_sells: pendingSells,

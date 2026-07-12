@@ -5,6 +5,7 @@
 import { getDb } from '../db/schema.js';
 import { getIbkrTradingConfig, validateTradePlanStrict } from './ibkr-trading-rules.js';
 import { IBKR_POLICY_DEFAULTS } from './ibkr-workflow-variables.js';
+import { recordFill } from './ibkr-analytics.js';
 
 function todayUtc() {
   return new Date().toISOString().slice(0, 10);
@@ -274,8 +275,11 @@ export function releaseReservation(reservationId, { reason = 'rejected' } = {}) 
   return { ok: true, day_status: getDayStatus(row.owner_user_id, { day: row.day }) };
 }
 
-/** Mark reserved → filled (keep budget consumed). */
-export function confirmFill(reservationId) {
+/** Mark reserved → filled (keep budget consumed) and record durable fill. */
+export function confirmFill(
+  reservationId,
+  { fillPrice = null, fillQty = null, ibOrderId = null, source = 'confirm_fill', avgCostForPnl = null } = {}
+) {
   ensureIbkrLedgerTables();
   const db = getDb();
   const row = db.prepare('SELECT * FROM ibkr_trade_reservations WHERE id = ?').get(reservationId);
@@ -297,7 +301,42 @@ export function confirmFill(reservationId) {
     }
   });
   tx();
-  return { ok: true, day_status: getDayStatus(row.owner_user_id, { day: row.day }) };
+
+  let fillResult = null;
+  try {
+    const detail = row.detail_json ? JSON.parse(row.detail_json) : {};
+    const qty = fillQty != null ? Number(fillQty) : Number(row.qty);
+    const price =
+      fillPrice != null
+        ? Number(fillPrice)
+        : detail.entry_price != null
+          ? Number(detail.entry_price)
+          : Number(row.notional_usd) && qty
+            ? Number(row.notional_usd) / qty
+            : null;
+    fillResult = recordFill({
+      ownerUserId: row.owner_user_id,
+      reservationId: row.id,
+      runId: row.run_id,
+      symbolKey: row.symbol_key,
+      side: row.side,
+      qty,
+      fillPrice: price,
+      notionalUsd: price != null && qty ? Number((price * qty).toFixed(4)) : Number(row.notional_usd),
+      ibOrderId,
+      source,
+      avgCostForPnl,
+      detail: { reservation_detail: detail },
+    });
+  } catch (e) {
+    console.warn('[ibkr] recordFill after confirmFill:', e.message);
+  }
+
+  return {
+    ok: true,
+    day_status: getDayStatus(row.owner_user_id, { day: row.day }),
+    fill: fillResult,
+  };
 }
 
 export function saveResidual(ownerUserId, residual, { day = todayUtc() } = {}) {
@@ -404,6 +443,30 @@ export async function recordPlaceAttempt(
           ...reasonFromIbMessage(gr.terminal_reason_text || 'IB cancelled after place ack'),
           source: 'place_watch',
           qty: resRow.qty,
+        });
+      } else if (
+        !gr.terminal_cancelled &&
+        String(gr.terminal_status || '').toLowerCase() === 'filled' &&
+        resRow?.id
+      ) {
+        confirmFill(resRow.id, {
+          fillPrice: gr.avg_fill_price ?? resRow.entry_price ?? null,
+          fillQty: gr.filled_qty ?? resRow.qty,
+          ibOrderId: (gr.orderIds || [])[0] ?? null,
+          source: 'place_watch',
+        });
+        recordOrderEvent({
+          owner_user_id: ownerUserId,
+          reservation_id: resRow.id,
+          run_id: runId,
+          symbol_key: gr.key,
+          side: gr.side || resRow.side,
+          status: 'Filled',
+          reason_code: IBKR_ORDER_REASON.FILLED,
+          reason_text: gr.terminal_reason_text || 'Filled during post-ack watch',
+          source: 'place_watch',
+          qty: resRow.qty,
+          detail: { avg_fill_price: gr.avg_fill_price ?? null },
         });
       }
     } else {

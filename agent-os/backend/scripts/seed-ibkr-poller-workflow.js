@@ -43,14 +43,14 @@ const MAKER_PROMPT = `You are the Maker for IBKR max-hold exit review. Output ON
 Checker feedback is injected at the TOP of the user message when present.
 - If feedback is non-empty: revise EACH review to address it; do not only rephrase notes.
 - If a request conflicts with max_hold / allowlist / order_learnings: keep the rule and explain in rationale.
-- Honor BRAIN HISTORY summaries in the user message — avoid repeating past reject themes.
+- Honor BRAIN HISTORY and ORDER HISTORY summaries in the user message — avoid repeating past reject / IB cancel themes.
 
 Positions at/over max_hold_days ({{var.max_hold_days}}) need a decision: SELL_TO_CLOSE or HOLD.
 HOLD may extend by at most {{var.max_hold_extension_days}} days (field extend_days).
 Allowlist (instruments): {{var.allowlist}}
 Allowlist keys: {{var.allowlist_keys}}
 
-Use snapshot.order_learnings from the user message (last 30d cancel/fill reasons). Prefer exits that acknowledge prior IB cancel patterns when relevant.
+Use ORDER HISTORY (summarized cancels/fills) from the user message. Prefer exits that acknowledge prior IB cancel patterns when relevant.
 
 For each candidate provide detailed justification (thesis/risks/why_now style) so Checker can review.
 
@@ -194,6 +194,33 @@ export function buildIbkrPollerGraph({ parseScriptId = PARSE_SCRIPT_ID, parseExi
         },
       },
       {
+        id: 'api-order-history',
+        type: 'api',
+        position: { x: 820, y: 120 },
+        data: {
+          label: 'Order history (summarized)',
+          inputBindings: [
+            { id: 'url', mode: 'static', value: `${backendBase}/api/ibkr-trading/order-learnings` },
+            {
+              id: 'body',
+              mode: 'static',
+              value: JSON.stringify({
+                days: '{{var.order_history_days}}',
+                response_type: 'summarized',
+                limit: 40,
+                purpose: 'IBKR poller Maker learning from prior order cancels/fills/rejects',
+              }).replace('"{{var.order_history_days}}"', '{{var.order_history_days}}'),
+            },
+            {
+              id: 'headers',
+              mode: 'static',
+              value: JSON.stringify({ 'Content-Type': 'application/json', 'x-internal-test': '1' }),
+            },
+          ],
+          taskConfig: { method: 'POST', authType: 'none', timeoutMs: 120000 },
+        },
+      },
+      {
         id: 'while-exit',
         type: 'while',
         position: { x: 900, y: 120 },
@@ -219,7 +246,7 @@ export function buildIbkrPollerGraph({ parseScriptId = PARSE_SCRIPT_ID, parseExi
               id: 'userMessage',
               mode: 'static',
               value:
-                '=== CHECKER FEEDBACK (address every point on retries; empty on first pass) ===\n{{parse-exit.adjustments}}\n\n=== BRAIN HISTORY (prior maker/checker learnings, summarized) ===\n{{api-brain-history.body.context_text}}\n\n=== EXIT CANDIDATES / SNAPSHOT ===\n{{api-candidates.bodyText}}\n\nAccount snapshot learnings:\n{{api-snapshot.order_learnings}}\n\n=== RUN REQUEST ===\n{{input}}',
+                '=== CHECKER FEEDBACK (address every point on retries; empty on first pass) ===\n{{parse-exit.adjustments}}\n\n=== BRAIN HISTORY (prior maker/checker learnings, summarized) ===\n{{api-brain-history.body.context_text}}\n\n=== ORDER HISTORY (prior cancels/fills/rejects, summarized) ===\n{{api-order-history.body.context_text}}\n\n=== EXIT CANDIDATES / SNAPSHOT ===\n{{api-candidates.bodyText}}\n\n=== RUN REQUEST ===\n{{input}}',
             },
           ],
           taskConfig: {
@@ -245,7 +272,7 @@ export function buildIbkrPollerGraph({ parseScriptId = PARSE_SCRIPT_ID, parseExi
               id: 'userMessage',
               mode: 'static',
               value:
-                '=== MAKER EXIT REVIEWS ===\n{{maker-exit.text}}\n\n=== ORDER LEARNINGS ===\n{{api-snapshot.order_learnings}}',
+                '=== MAKER EXIT REVIEWS ===\n{{maker-exit.text}}\n\n=== ORDER HISTORY (honor these) ===\n{{api-order-history.body.context_text}}',
             },
           ],
           taskConfig: {
@@ -386,7 +413,8 @@ export function buildIbkrPollerGraph({ parseScriptId = PARSE_SCRIPT_ID, parseExi
       { id: 'e2', source: 'api-snapshot', target: 'api-candidates' },
       { id: 'e3', source: 'api-candidates', target: 'if-candidates' },
       { id: 'e4', source: 'if-candidates', target: 'api-brain-history', sourceHandle: 'true' },
-      { id: 'e4b', source: 'api-brain-history', target: 'while-exit' },
+      { id: 'e4b', source: 'api-brain-history', target: 'api-order-history' },
+      { id: 'e4c', source: 'api-order-history', target: 'while-exit' },
       { id: 'e5', source: 'while-exit', target: 'maker-exit', sourceHandle: 'loop' },
       { id: 'e6', source: 'maker-exit', target: 'checker-exit' },
       { id: 'e7', source: 'checker-exit', target: 'parse-exit' },

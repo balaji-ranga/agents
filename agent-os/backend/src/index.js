@@ -43,7 +43,7 @@ import { runPipelineTick, runPipelineTickAll } from './services/job-applicant-pi
 import { getLastIntentDebug } from './services/intent-classifier.js';
 import { initAgentWorkflowScheduler } from './services/agent-workflow-scheduler.js';
 import { syncWorkflowScheduleRegistry } from './services/agent-workflow-store.js';
-import { resumeStuckWorkflowRuns } from './services/agent-workflow-runner.js';
+import { resumeStuckWorkflowRuns, startWorkflowTimeoutWatchdog } from './services/agent-workflow-runner.js';
 import { seedWorkflowBuilderAgent } from '../scripts/seed-workflow-builder-agent.js';
 
 const app = express();
@@ -83,6 +83,7 @@ try {
 }
 try {
   resumeStuckWorkflowRuns();
+  startWorkflowTimeoutWatchdog();
 } catch (e) {
   console.warn('[startup] workflow run resume:', e.message);
 }

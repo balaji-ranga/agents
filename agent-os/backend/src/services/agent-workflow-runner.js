@@ -42,6 +42,7 @@ import {
   withNodeTimeout,
   isNodeTimeoutError,
   buildTimeoutFallbackOutputs,
+  DEFAULT_NODE_TIMEOUT_MS,
 } from './agent-workflow-node-timeout.js';
 
 function db() {
@@ -119,79 +120,6 @@ function getIncomingEdges(graph, nodeId) {
 
 function getOutgoingEdges(graph, nodeId) {
   return graph.edges.filter((e) => e.source === nodeId);
-}
-
-/**
- * Complete a timed node: race work against timeoutMs; on timeout either fail the run
- * or continue with defaultTimeoutOutput (timeoutAction=default_output).
- */
-async function completeTimedNodeStep({
-  runId,
-  node,
-  nodeId,
-  def,
-  runRow,
-  context,
-  inputRecord,
-  work,
-  kanban,
-}) {
-  const config = node.data?.taskConfig || node.data?.config || {};
-  const { timeoutMs, timeoutAction, defaultOutput } = resolveNodeTimeoutConfig(config);
-  upsertStep(runId, node, 'in_progress', { input: inputRecord });
-  try {
-    const outputs = await withNodeTimeout(work(), timeoutMs);
-    storeNodeOutput(context, node.id, outputs);
-    saveContext(runId, context);
-    upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
-    if (kanban) {
-      const meta = typeof kanban === 'function' ? kanban(outputs) : kanban;
-      upsertCompletedStepKanban({
-        runId,
-        definitionId: def.id,
-        definitionName: def.name,
-        nodeId: node.id,
-        nodeLabel: meta.nodeLabel || node.data?.label || node.type,
-        nodeType: node.type,
-        agentId: null,
-        ownerUserId: runRow.owner_user_id,
-        summary: meta.summary || '',
-        detail: meta.detail || {},
-      });
-    }
-    updateRunProgress(runId);
-    await advanceFromNode(runId, nodeId);
-  } catch (err) {
-    if (isNodeTimeoutError(err) && timeoutAction === 'default_output') {
-      const outputs = buildTimeoutFallbackOutputs(node.type, defaultOutput, timeoutMs);
-      storeNodeOutput(context, node.id, outputs);
-      saveContext(runId, context);
-      upsertStep(runId, node, 'completed', {
-        output: buildStepOutputRecord(outputs),
-        error_message: err.message,
-      });
-      if (kanban) {
-        const meta = typeof kanban === 'function' ? kanban(outputs) : kanban;
-        upsertCompletedStepKanban({
-          runId,
-          definitionId: def.id,
-          definitionName: def.name,
-          nodeId: node.id,
-          nodeLabel: meta.nodeLabel || node.data?.label || node.type,
-          nodeType: node.type,
-          agentId: null,
-          ownerUserId: runRow.owner_user_id,
-          summary: `Timed out — continued with default output (${Math.round(timeoutMs / 1000)}s)`,
-          detail: { ...(meta.detail || {}), timed_out: true, timeout_ms: timeoutMs },
-        });
-      }
-      updateRunProgress(runId);
-      await advanceFromNode(runId, nodeId);
-      return;
-    }
-    upsertStep(runId, node, 'failed', { error_message: err.message });
-    failRun(runId, err.message);
-  }
 }
 
 function isWhileLoopBodyNode(graph, nodeId) {
@@ -438,6 +366,133 @@ function failRun(runId, message) {
       `UPDATE agent_workflow_runs SET status = 'failed', error_message = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
     )
     .run(message, runId);
+}
+
+/** Node types that can safely re-dispatch after a process restart. */
+const RESUMABLE_IN_PROGRESS_TYPES = new Set([
+  'brain',
+  'api',
+  'custom_script',
+  'mcp_tool',
+  'email',
+  'externalAgent',
+  'tool',
+  'sub_workflow',
+]);
+
+/** Wait for external completion after restart (do not re-dispatch). */
+const EXTERNAL_WAIT_TYPES = new Set(['agent', 'ceo_approval']);
+
+/** Event listeners — leave status; separate restore may reconnect streams. */
+const LISTEN_TYPES = new Set(['sse_listen', 'mcp_listen']);
+
+/** Per-step remaining timeout after resume: `${runId}:${nodeId}` → ms */
+const resumeTimeoutOverrides = new Map();
+
+/** Wall clock when this process loaded — steps started before this are restart orphans. */
+const PROCESS_STARTED_AT_MS = Date.now();
+
+function stepStartedAtMs(step) {
+  const raw = String(step?.started_at || '').trim();
+  if (!raw) return Date.now();
+  const normalized = raw.includes('T') ? raw : `${raw.replace(' ', 'T')}Z`;
+  const t = Date.parse(normalized);
+  return Number.isFinite(t) ? t : Date.now();
+}
+
+function isRestartOrphanStep(step) {
+  return stepStartedAtMs(step) < PROCESS_STARTED_AT_MS - 500;
+}
+
+function remainingTimeoutMsForStep(step, timeoutMs) {
+  const limit = Number(timeoutMs) > 0 ? Number(timeoutMs) : DEFAULT_NODE_TIMEOUT_MS;
+  const elapsed = Math.max(0, Date.now() - stepStartedAtMs(step));
+  return Math.max(1000, limit - elapsed);
+}
+
+function isPersistedStepTimedOut(step, timeoutMs) {
+  const limit = Number(timeoutMs) > 0 ? Number(timeoutMs) : DEFAULT_NODE_TIMEOUT_MS;
+  return Date.now() - stepStartedAtMs(step) >= limit;
+}
+
+/**
+ * Complete a timed node: race work against timeoutMs; on timeout either fail the run
+ * or continue with defaultTimeoutOutput (timeoutAction=default_output).
+ * After restart, resume may pass timeoutMsOverride = remaining time from original started_at.
+ */
+async function completeTimedNodeStep({
+  runId,
+  node,
+  nodeId,
+  def,
+  runRow,
+  context,
+  inputRecord,
+  work,
+  kanban,
+}) {
+  const config = node.data?.taskConfig || node.data?.config || {};
+  const { timeoutMs, timeoutAction, defaultOutput } = resolveNodeTimeoutConfig(config);
+  const overrideKey = `${runId}:${node.id}`;
+  const override = resumeTimeoutOverrides.get(overrideKey);
+  if (override != null) resumeTimeoutOverrides.delete(overrideKey);
+  const effectiveTimeout =
+    override?.remainingTimeoutMs != null ? Number(override.remainingTimeoutMs) : timeoutMs;
+
+  upsertStep(runId, node, 'in_progress', { input: inputRecord });
+  try {
+    const outputs = await withNodeTimeout(work(), effectiveTimeout);
+    storeNodeOutput(context, node.id, outputs);
+    saveContext(runId, context);
+    upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
+    if (kanban) {
+      const meta = typeof kanban === 'function' ? kanban(outputs) : kanban;
+      upsertCompletedStepKanban({
+        runId,
+        definitionId: def.id,
+        definitionName: def.name,
+        nodeId: node.id,
+        nodeLabel: meta.nodeLabel || node.data?.label || node.type,
+        nodeType: node.type,
+        agentId: null,
+        ownerUserId: runRow.owner_user_id,
+        summary: meta.summary || '',
+        detail: meta.detail || {},
+      });
+    }
+    updateRunProgress(runId);
+    await advanceFromNode(runId, nodeId);
+  } catch (err) {
+    if (isNodeTimeoutError(err) && timeoutAction === 'default_output') {
+      const outputs = buildTimeoutFallbackOutputs(node.type, defaultOutput, timeoutMs);
+      storeNodeOutput(context, node.id, outputs);
+      saveContext(runId, context);
+      upsertStep(runId, node, 'completed', {
+        output: buildStepOutputRecord(outputs),
+        error_message: err.message,
+      });
+      if (kanban) {
+        const meta = typeof kanban === 'function' ? kanban(outputs) : kanban;
+        upsertCompletedStepKanban({
+          runId,
+          definitionId: def.id,
+          definitionName: def.name,
+          nodeId: node.id,
+          nodeLabel: meta.nodeLabel || node.data?.label || node.type,
+          nodeType: node.type,
+          agentId: null,
+          ownerUserId: runRow.owner_user_id,
+          summary: `Timed out — continued with default output (${Math.round(timeoutMs / 1000)}s)`,
+          detail: { ...(meta.detail || {}), timed_out: true, timeout_ms: timeoutMs },
+        });
+      }
+      updateRunProgress(runId);
+      await advanceFromNode(runId, nodeId);
+      return;
+    }
+    upsertStep(runId, node, 'failed', { error_message: err.message });
+    failRun(runId, err.message);
+  }
 }
 
 function completeRun(runId) {
@@ -1029,30 +1084,23 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
   if (node.type === 'email') {
     const inputRecord = buildStepInputRecord(node, graph, context);
     const config = node.data?.taskConfig || node.data?.config || {};
-    upsertStep(runId, node, 'in_progress', { input: inputRecord });
-    try {
-      const outputs = await executeEmailTask(inputRecord.resolved, config);
-      storeNodeOutput(context, node.id, outputs);
-      saveContext(runId, context);
-      upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
-      upsertCompletedStepKanban({
-        runId,
-        definitionId: def.id,
-        definitionName: def.name,
-        nodeId: node.id,
+    await completeTimedNodeStep({
+      runId,
+      node,
+      nodeId,
+      def,
+      runRow,
+      context,
+      inputRecord,
+      work: () => executeEmailTask(inputRecord.resolved, config),
+      kanban: (outputs) => ({
         nodeLabel: node.data?.label || 'Send Email',
-        nodeType: 'email',
-        agentId: null,
-        ownerUserId: runRow.owner_user_id,
-        summary: outputs.sent ? `Email sent to ${outputs.to}` : `Email attempted: ${outputs.error || 'not sent'}`,
+        summary: outputs.sent
+          ? `Email sent to ${outputs.to}`
+          : `Email attempted: ${outputs.error || 'not sent'}`,
         detail: { inputs: inputRecord.summary, outputs },
-      });
-      updateRunProgress(runId);
-      await advanceFromNode(runId, nodeId);
-    } catch (err) {
-      upsertStep(runId, node, 'failed', { error_message: err.message });
-      failRun(runId, err.message);
-    }
+      }),
+    });
     return;
   }
 
@@ -1407,30 +1455,228 @@ export async function injectWorkflowStepOutput(runId, nodeId, outputText) {
   return store.getRun(runId, runRow.owner_user_id);
 }
 
-/** Resume runs left orphaned when the server restarted mid-execution. */
-export function resumeStuckWorkflowRuns() {
-  const rows = db()
-    .prepare(`SELECT id FROM agent_workflow_runs WHERE status = 'running' ORDER BY id ASC`)
-    .all();
-  for (const { id: runId } of rows) {
-    const steps = db()
-      .prepare(`SELECT node_id, status FROM agent_workflow_run_steps WHERE run_id = ? ORDER BY id ASC`)
-      .all(runId);
-    if (!steps.length) continue;
-    const hasActive = steps.some((s) => ['in_progress', 'listening', 'pending'].includes(s.status));
-    if (hasActive) continue;
-    const lastCompleted = [...steps].reverse().find((s) => s.status === 'completed');
-    if (!lastCompleted) continue;
-    console.log(`[agent-workflow] resuming stuck run ${runId} from ${lastCompleted.node_id}`);
-    void advanceFromNode(runId, lastCompleted.node_id)
-      .catch((err) => {
-        console.error(`[agent-workflow] resume run ${runId} failed:`, err);
-        failRun(runId, err?.message || 'Workflow resume failed');
-      })
-      .finally(() => {
-        processPendingDelegationTasks().catch(() => {});
-      });
+/**
+ * Apply persisted timeout for an in_progress step using original started_at + node config.
+ * Used after restart and by the periodic watchdog (in-memory timers are gone on restart).
+ */
+async function applyPersistedNodeTimeout(runId, node, def, runRow, context, timeoutMs, timeoutAction, defaultOutput) {
+  const secs = Math.max(1, Math.round(Number(timeoutMs) / 1000));
+  const errMessage = `Node timed out after ${secs}s (limit ${timeoutMs}ms)`;
+
+  if (timeoutAction === 'default_output') {
+    const outputs = buildTimeoutFallbackOutputs(node.type, defaultOutput, timeoutMs);
+    storeNodeOutput(context, node.id, outputs);
+    saveContext(runId, context);
+    upsertStep(runId, node, 'completed', {
+      output: buildStepOutputRecord(outputs),
+      error_message: errMessage,
+    });
+    updateRunProgress(runId);
+    console.log(
+      `[agent-workflow] run ${runId} node ${node.id} timed out — continued with default_output`
+    );
+    await advanceFromNode(runId, node.id);
+    return;
   }
+
+  upsertStep(runId, node, 'failed', { error_message: errMessage });
+  failRun(runId, errMessage);
+  console.log(`[agent-workflow] run ${runId} node ${node.id} timed out — run failed`);
+}
+
+/**
+ * Fail or continue any in_progress step whose wall-clock age exceeds its configured timeout.
+ * @returns {number} number of steps reaped
+ */
+export async function reapTimedOutWorkflowSteps() {
+  const rows = db()
+    .prepare(
+      `SELECT s.run_id, s.node_id, s.node_type, s.started_at, s.iteration
+       FROM agent_workflow_run_steps s
+       JOIN agent_workflow_runs r ON r.id = s.run_id
+       WHERE r.status = 'running' AND s.status = 'in_progress'
+       ORDER BY s.id ASC`
+    )
+    .all();
+
+  let reaped = 0;
+  for (const step of rows) {
+    const runRow = db().prepare('SELECT * FROM agent_workflow_runs WHERE id = ?').get(step.run_id);
+    if (!runRow || runRow.status !== 'running') continue;
+
+    const def = store.getDefinition(runRow.definition_id);
+    const graph = def?.published_graph || { nodes: [], edges: [] };
+    const node = getNode(graph, step.node_id);
+    if (!node) continue;
+    if (LISTEN_TYPES.has(node.type) || EXTERNAL_WAIT_TYPES.has(node.type)) continue;
+
+    const config = node.data?.taskConfig || node.data?.config || {};
+    const { timeoutMs, timeoutAction, defaultOutput } = resolveNodeTimeoutConfig(config);
+    if (!isPersistedStepTimedOut(step, timeoutMs)) continue;
+
+    const context = parseContext(runRow);
+    activeStepMeta = { graph, context };
+    try {
+      await applyPersistedNodeTimeout(
+        step.run_id,
+        node,
+        def,
+        runRow,
+        context,
+        timeoutMs,
+        timeoutAction,
+        defaultOutput
+      );
+      reaped += 1;
+    } catch (err) {
+      console.error(
+        `[agent-workflow] reap timeout run ${step.run_id} node ${step.node_id} failed:`,
+        err?.message || err
+      );
+      failRun(step.run_id, err?.message || 'Workflow timeout reap failed');
+    } finally {
+      activeStepMeta = null;
+    }
+  }
+  return reaped;
+}
+
+/**
+ * Resume runs left orphaned when the server restarted mid-execution.
+ * Continues from last persisted state; re-arms node timeouts from original started_at.
+ */
+export function resumeStuckWorkflowRuns() {
+  void (async () => {
+    try {
+      await reapTimedOutWorkflowSteps();
+    } catch (err) {
+      console.warn('[agent-workflow] startup timeout reap:', err?.message || err);
+    }
+
+    const rows = db()
+      .prepare(`SELECT id FROM agent_workflow_runs WHERE status = 'running' ORDER BY id ASC`)
+      .all();
+
+    for (const { id: runId } of rows) {
+      const runRow = db().prepare('SELECT * FROM agent_workflow_runs WHERE id = ?').get(runId);
+      if (!runRow || runRow.status !== 'running') continue;
+
+      const def = store.getDefinition(runRow.definition_id);
+      const graph = def?.published_graph || { nodes: [], edges: [] };
+      const context = parseContext(runRow);
+      const steps = db()
+        .prepare(
+          `SELECT id, node_id, node_type, status, started_at, iteration
+           FROM agent_workflow_run_steps WHERE run_id = ? ORDER BY id ASC`
+        )
+        .all(runId);
+      if (!steps.length) continue;
+
+      const latestByNode = new Map();
+      for (const s of steps) latestByNode.set(s.node_id, s);
+
+      let resumedWork = false;
+      const scheduledNodeIds = new Set();
+
+      for (const step of latestByNode.values()) {
+        if (step.status !== 'in_progress') continue;
+        const node = getNode(graph, step.node_id);
+        if (!node) continue;
+        if (LISTEN_TYPES.has(node.type) || EXTERNAL_WAIT_TYPES.has(node.type)) continue;
+
+        const config = node.data?.taskConfig || node.data?.config || {};
+        const { timeoutMs } = resolveNodeTimeoutConfig(config);
+
+        if (isPersistedStepTimedOut(step, timeoutMs)) {
+          // Already handled by reap; skip if still somehow present
+          continue;
+        }
+
+        // Only re-dispatch steps that began before this process (avoid racing with reap→advance).
+        if (!isRestartOrphanStep(step)) continue;
+
+        if (!RESUMABLE_IN_PROGRESS_TYPES.has(node.type)) {
+          console.warn(
+            `[agent-workflow] run ${runId} node ${node.id} (${node.type}) left in_progress after restart — not auto-resumable`
+          );
+          continue;
+        }
+
+        const remaining = remainingTimeoutMsForStep(step, timeoutMs);
+        resumeTimeoutOverrides.set(`${runId}:${node.id}`, { remainingTimeoutMs: remaining });
+        // Reset to pending so executeNode will re-dispatch; started_at is preserved (COALESCE).
+        activeStepMeta = { graph, context };
+        upsertStep(runId, node, 'pending', {});
+        activeStepMeta = null;
+        scheduledNodeIds.add(node.id);
+        console.log(
+          `[agent-workflow] resuming run ${runId} node ${node.id} (${node.type}) with ${Math.round(remaining / 1000)}s remaining timeout`
+        );
+        resumedWork = true;
+        void executeNode(runId, node.id, graph, context, def, runRow)
+          .catch((err) => {
+            console.error(`[agent-workflow] resume run ${runId} node ${node.id} failed:`, err);
+            failRun(runId, err?.message || 'Workflow resume failed');
+          })
+          .finally(() => {
+            processPendingDelegationTasks().catch(() => {});
+          });
+      }
+
+      for (const step of latestByNode.values()) {
+        // Only dispatch originally-pending steps here; in_progress→pending already scheduled.
+        if (step.status !== 'pending') continue;
+        if (scheduledNodeIds.has(step.node_id)) continue;
+        const node = getNode(graph, step.node_id);
+        if (!node) continue;
+        console.log(`[agent-workflow] dispatching pending run ${runId} node ${node.id}`);
+        scheduledNodeIds.add(node.id);
+        resumedWork = true;
+        void executeNode(runId, node.id, graph, context, def, runRow)
+          .catch((err) => {
+            console.error(`[agent-workflow] resume pending run ${runId} node ${node.id} failed:`, err);
+            failRun(runId, err?.message || 'Workflow resume failed');
+          })
+          .finally(() => {
+            processPendingDelegationTasks().catch(() => {});
+          });
+      }
+
+      if (resumedWork) continue;
+
+      const hasActive = [...latestByNode.values()].some((s) =>
+        ['in_progress', 'listening', 'pending'].includes(s.status)
+      );
+      if (hasActive) continue;
+
+      const lastCompleted = [...steps].reverse().find((s) => s.status === 'completed');
+      if (!lastCompleted) continue;
+      console.log(`[agent-workflow] resuming stuck run ${runId} from ${lastCompleted.node_id}`);
+      void advanceFromNode(runId, lastCompleted.node_id)
+        .catch((err) => {
+          console.error(`[agent-workflow] resume run ${runId} failed:`, err);
+          failRun(runId, err?.message || 'Workflow resume failed');
+        })
+        .finally(() => {
+          processPendingDelegationTasks().catch(() => {});
+        });
+    }
+  })();
+}
+
+let timeoutWatchdogTimer = null;
+
+/** Periodic safety net: reap steps whose started_at + timeoutMs elapsed (covers restart + lost timers). */
+export function startWorkflowTimeoutWatchdog(intervalMs = 30000) {
+  if (timeoutWatchdogTimer) return;
+  const ms = Math.max(5000, Number(intervalMs) || 30000);
+  timeoutWatchdogTimer = setInterval(() => {
+    void reapTimedOutWorkflowSteps().catch((err) => {
+      console.warn('[agent-workflow] timeout watchdog:', err?.message || err);
+    });
+  }, ms);
+  if (typeof timeoutWatchdogTimer.unref === 'function') timeoutWatchdogTimer.unref();
+  console.log(`[agent-workflow] timeout watchdog every ${ms}ms`);
 }
 
 export { isAgentWorkflowPrompt };

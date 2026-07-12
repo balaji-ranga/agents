@@ -50,11 +50,15 @@ function isSmtpSuccess(code) {
 function sendSmtpMail({ host, port, secure, user, pass, from, to, cc, subject, body }) {
   return new Promise((resolve) => {
     const recipients = [to, cc].filter(Boolean).join(', ');
+    const messageId = `<agent-os.${Date.now()}.${Math.random().toString(36).slice(2, 10)}@${String(from).split('@')[1] || 'localhost'}>`;
     const lines = [
       `From: ${from}`,
       `To: ${to}`,
       ...(cc ? [`Cc: ${cc}`] : []),
+      `Reply-To: ${from}`,
       `Subject: ${subject}`,
+      `Date: ${new Date().toUTCString()}`,
+      `Message-ID: ${messageId}`,
       'MIME-Version: 1.0',
       'Content-Type: text/plain; charset=utf-8',
       '',
@@ -170,7 +174,7 @@ function sendSmtpMail({ host, port, secure, user, pass, from, to, cc, subject, b
         stage = 'data-done';
       } else if (stage === 'data-done' && isSmtpSuccess(code)) {
         send('QUIT');
-        const mid = line.match(/queued as (\S+)/i)?.[1] || line.match(/<([^>]+)>/)?.[1] || null;
+        const mid = line.match(/queued as (\S+)/i)?.[1] || line.match(/<([^>]+)>/)?.[1] || messageId;
         succeed(mid, line);
       } else if (code >= 400) {
         fail(line);

@@ -300,7 +300,9 @@ See `backend/.env.example`.
 - Retention: **30 days** (pruned on write).
 - Each `POST /account-snapshot` **reconciles** `reserved` ledger rows vs live open orders/positions and attaches `order_learnings` for the Maker.
 - Workflow cancels use standard reasons: `workflow_dayplan_cancel`, `workflow_poller_cancel`, `workflow_cancel_before_sell`, `workflow_e2e_cancel_all`.
-- APIs: `GET /api/ibkr-trading/order-events`, `GET /api/ibkr-trading/order-learnings`, `POST /api/ibkr-trading/reconcile-orders`.
+- APIs: `GET|POST /api/ibkr-trading/order-events`, `GET|POST /api/ibkr-trading/order-learnings`
+  - `days` (e.g. 3 / 7 / 30, max retention 30), optional `symbol_key`, `limit`
+  - `response_type`: `actual` (events + heuristic learnings + `context_text`) | `summarized` (platform LLM → `context_text` / `bodyText`)
 
 ### Brain history (maker/checker audit → Maker context)
 
@@ -309,6 +311,21 @@ See `backend/.env.example`.
 - `actual` returns Brain step I/O from `agent_workflow_run_steps`; `summarized` uses platform LLM (`.env` OPENAI_*) to compress into `context_text` for prompts
 - Day-plan / poller call this with `response_type=summarized` before the maker loop and inject `{{api-brain-history.body.context_text}}` into Maker user message
 - Variable: `brain_history_days` (default 7)
+
+### Order history in workflows
+
+- Day-plan / poller call `POST /api/ibkr-trading/order-learnings` with `response_type=summarized` after brain-history
+- Inject `{{api-order-history.body.context_text}}` into Maker and Checker user messages
+- Variable: `order_history_days` (default 7)
+
+### Portfolio analytics (fills / PnL / cash)
+
+- Durable tables: `ibkr_fills`, `ibkr_position_snapshots`, `ibkr_realized_pnl`, `ibkr_cash_events`
+- Snapshot persist + fill confirm wired from place watch / reconcile / `confirmFill`
+- Entitled APIs (session owner only):  
+  `GET|POST /api/ibkr-trading/analytics/summary`,  
+  `GET .../fills`, `/positions`, `/pnl`, `/cash-events`
+- Content tools for agents: `ibkr_portfolio_analytics`, `ibkr_fills_history`, `ibkr_pnl`, `ibkr_cash_events`
 
 ---
 

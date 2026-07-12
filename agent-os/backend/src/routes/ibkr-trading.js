@@ -64,6 +64,15 @@ function allowInternalOrAuth(req, res, next) {
   return requireAuth(req, res, next);
 }
 
+/** Analytics: owner from authenticated session only — never body/query owner_user_id. */
+function entitledOwnerId(req) {
+  if (req.headers['x-internal-test'] === '1') {
+    // Internal workflow/tool calls: fixed paper CEO — ignore spoofed body owner
+    return process.env.AGENT_OS_BALA_CEO_ID || 'ceo-bala';
+  }
+  return req.authUser?.id;
+}
+
 function enrichPositions(positions = [], catalog = null) {
   return (positions || []).map((p) => {
     const meta = findAllowlistEntry(p.key || `${p.exchange}:${p.symbol}` || p.symbol, catalog);
@@ -147,7 +156,9 @@ router.post('/account-snapshot', async (req, res) => {
     const db = getDb();
     const withAge = positions.map((p) => {
       const meta = db
-        .prepare('SELECT opened_at, hold_until, last_review_at FROM ibkr_position_meta WHERE owner_user_id = ? AND symbol_key = ?')
+        .prepare(
+          'SELECT opened_at, hold_until, last_review_at FROM ibkr_position_meta WHERE owner_user_id = ? AND symbol_key = ?'
+        )
         .get(owner, p.key);
       return {
         ...p,
@@ -156,6 +167,24 @@ router.post('/account-snapshot', async (req, res) => {
         age_days: ageDays(meta?.opened_at),
       };
     });
+
+    let analytics_persist = null;
+    try {
+      const { persistAccountAnalyticsSnapshot, ensureIbkrAnalyticsTables } = await import(
+        '../services/ibkr-analytics.js'
+      );
+      ensureIbkrAnalyticsTables();
+      analytics_persist = persistAccountAnalyticsSnapshot(owner, {
+        positions: withAge,
+        cashUsd: snap.cash_usd,
+        referencePrices: snap.reference_prices || {},
+        accountSummary: snap.summary || null,
+        source: 'account_snapshot',
+      });
+    } catch (e) {
+      analytics_persist = { ok: false, error: e.message };
+    }
+
     const day = ledger.getDayStatus(owner, {
       cashUsd: snap.cash_usd,
       budgetUsd: budgetOpts.dailyBudgetUsd,
@@ -175,6 +204,7 @@ router.post('/account-snapshot', async (req, res) => {
       require_live_cash: budgetOpts.requireLiveCash,
       reconcile,
       order_learnings,
+      analytics_persist,
       ok: true,
       bodyText: null,
     };
@@ -499,35 +529,197 @@ router.post('/reconcile-orders', async (req, res) => {
 router.get('/order-events', async (req, res) => {
   try {
     const owner = req.query.owner_user_id || req.authUser.id;
-    const days = req.query.days != null ? Number(req.query.days) : 30;
-    const limit = req.query.limit != null ? Number(req.query.limit) : 100;
-    const symbolKey = req.query.symbol_key || req.query.key || null;
-    const { listOrderEvents, buildOrderLearnings, ensureIbkrOrderEventTables } = await import(
-      '../services/ibkr-order-events.js'
-    );
+    const { getOrderHistory, ensureIbkrOrderEventTables } = await import('../services/ibkr-order-events.js');
     ensureIbkrOrderEventTables();
-    const events = listOrderEvents(owner, { days, limit, symbolKey });
-    res.json({
-      ok: true,
-      events,
-      order_learnings: buildOrderLearnings(owner, { days, limit }),
+    const result = await getOrderHistory({
+      ownerUserId: owner,
+      days: req.query.days != null ? Number(req.query.days) : 30,
+      limit: req.query.limit != null ? Number(req.query.limit) : 100,
+      symbolKey: req.query.symbol_key || req.query.key || null,
+      responseType: req.query.response_type || req.query.responseType || 'actual',
+      purpose: req.query.purpose || undefined,
     });
+    res.json(result);
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+router.post('/order-events', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const owner = body.owner_user_id || req.authUser.id;
+    const { getOrderHistory, ensureIbkrOrderEventTables } = await import('../services/ibkr-order-events.js');
+    ensureIbkrOrderEventTables();
+    const result = await getOrderHistory({
+      ownerUserId: owner,
+      days: body.days != null ? Number(body.days) : 7,
+      limit: body.limit != null ? Number(body.limit) : 40,
+      symbolKey: body.symbol_key || body.key || null,
+      responseType: body.response_type || body.responseType || 'actual',
+      purpose: body.purpose || undefined,
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
   }
 });
 
 router.get('/order-learnings', async (req, res) => {
   try {
     const owner = req.query.owner_user_id || req.authUser.id;
-    const days = req.query.days != null ? Number(req.query.days) : 30;
-    const { buildOrderLearnings, ensureIbkrOrderEventTables } = await import(
-      '../services/ibkr-order-events.js'
-    );
+    const { getOrderHistory, ensureIbkrOrderEventTables } = await import('../services/ibkr-order-events.js');
     ensureIbkrOrderEventTables();
-    res.json({ ok: true, ...buildOrderLearnings(owner, { days }) });
+    // Alias: default summarized-friendly context (heuristic + optional LLM)
+    const result = await getOrderHistory({
+      ownerUserId: owner,
+      days: req.query.days != null ? Number(req.query.days) : 30,
+      limit: req.query.limit != null ? Number(req.query.limit) : 40,
+      symbolKey: req.query.symbol_key || req.query.key || null,
+      responseType: req.query.response_type || req.query.responseType || 'actual',
+      purpose: req.query.purpose || 'IBKR Maker order learnings',
+    });
+    res.json(result);
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+router.post('/order-learnings', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const owner = body.owner_user_id || req.authUser.id;
+    const { getOrderHistory, ensureIbkrOrderEventTables } = await import('../services/ibkr-order-events.js');
+    ensureIbkrOrderEventTables();
+    const result = await getOrderHistory({
+      ownerUserId: owner,
+      days: body.days != null ? Number(body.days) : 7,
+      limit: body.limit != null ? Number(body.limit) : 40,
+      symbolKey: body.symbol_key || body.key || null,
+      responseType: body.response_type || body.responseType || 'summarized',
+      purpose: body.purpose || 'IBKR Maker order learnings',
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+/** Portfolio analytics summary (entitled — session owner only). */
+router.get('/analytics/summary', async (req, res) => {
+  try {
+    const owner = entitledOwnerId(req);
+    const { getPortfolioAnalytics, ensureIbkrAnalyticsTables } = await import(
+      '../services/ibkr-analytics.js'
+    );
+    ensureIbkrAnalyticsTables();
+    const includeLive = String(req.query.include_live || '1') !== '0';
+    const result = await getPortfolioAnalytics(owner, {
+      days: req.query.days != null ? Number(req.query.days) : 30,
+      includeLive,
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+router.post('/analytics/summary', async (req, res) => {
+  try {
+    const owner = entitledOwnerId(req);
+    const body = req.body || {};
+    const { getPortfolioAnalytics, ensureIbkrAnalyticsTables } = await import(
+      '../services/ibkr-analytics.js'
+    );
+    ensureIbkrAnalyticsTables();
+    const result = await getPortfolioAnalytics(owner, {
+      days: body.days != null ? Number(body.days) : 30,
+      includeLive: body.include_live !== false && body.includeLive !== false,
+      liveSnapshot: body.snapshot || null,
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+router.get('/analytics/fills', async (req, res) => {
+  try {
+    const owner = entitledOwnerId(req);
+    const { listFills, ensureIbkrAnalyticsTables } = await import('../services/ibkr-analytics.js');
+    ensureIbkrAnalyticsTables();
+    res.json({
+      ok: true,
+      fills: listFills(owner, {
+        days: req.query.days != null ? Number(req.query.days) : 30,
+        limit: req.query.limit != null ? Number(req.query.limit) : 100,
+        symbolKey: req.query.symbol_key || null,
+      }),
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+router.get('/analytics/positions', async (req, res) => {
+  try {
+    const owner = entitledOwnerId(req);
+    const { listPositionSnapshots, ensureIbkrAnalyticsTables } = await import(
+      '../services/ibkr-analytics.js'
+    );
+    ensureIbkrAnalyticsTables();
+    res.json({
+      ok: true,
+      positions: listPositionSnapshots(owner, {
+        latestOnly: String(req.query.latest_only || '1') !== '0',
+        limit: req.query.limit != null ? Number(req.query.limit) : 50,
+      }),
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+router.get('/analytics/pnl', async (req, res) => {
+  try {
+    const owner = entitledOwnerId(req);
+    const { listRealizedPnl, listPositionSnapshots, ensureIbkrAnalyticsTables } = await import(
+      '../services/ibkr-analytics.js'
+    );
+    ensureIbkrAnalyticsTables();
+    const realized = listRealizedPnl(owner, {
+      days: req.query.days != null ? Number(req.query.days) : 30,
+      limit: req.query.limit != null ? Number(req.query.limit) : 100,
+    });
+    const snaps = listPositionSnapshots(owner, { latestOnly: true });
+    const unrealized = snaps.reduce((s, p) => s + (Number(p.unrealized_pnl_usd) || 0), 0);
+    res.json({
+      ok: true,
+      realized_usd: Number(realized.reduce((s, r) => s + (Number(r.realized_pnl_usd) || 0), 0).toFixed(4)),
+      unrealized_usd: Number(unrealized.toFixed(4)),
+      realized_rows: realized,
+      position_snapshot: snaps,
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+router.get('/analytics/cash-events', async (req, res) => {
+  try {
+    const owner = entitledOwnerId(req);
+    const { listCashEvents, ensureIbkrAnalyticsTables } = await import('../services/ibkr-analytics.js');
+    ensureIbkrAnalyticsTables();
+    res.json({
+      ok: true,
+      events: listCashEvents(owner, {
+        days: req.query.days != null ? Number(req.query.days) : 30,
+        limit: req.query.limit != null ? Number(req.query.limit) : 100,
+        pendingOnly: String(req.query.pending_only || '0') === '1',
+      }),
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
   }
 });
 

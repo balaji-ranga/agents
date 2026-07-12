@@ -232,7 +232,17 @@ export async function reconcileReservationsWithBroker(
     const onPos = reservationMatchesPosition(row, posSet);
 
     if (side === 'BUY' && onPos && !onOpen) {
-      confirmFill(row.id);
+      const pos = (positions || []).find((p) => {
+        const pk = String(p.key || `${p.exchange}:${p.symbol}` || p.symbol || '').toUpperCase();
+        const rk = String(row.symbol_key || '').toUpperCase();
+        return pk === rk || String(p.symbol || '').toUpperCase() === rk.split(':').pop();
+      });
+      confirmFill(row.id, {
+        fillPrice: pos?.avg_cost ?? null,
+        fillQty: row.qty,
+        source: 'reconcile',
+        avgCostForPnl: pos?.avg_cost ?? null,
+      });
       recordOrderEvent({
         owner_user_id: ownerUserId,
         reservation_id: row.id,
@@ -244,6 +254,7 @@ export async function reconcileReservationsWithBroker(
         reason_text: 'Reconcile: position present, open order gone — marked filled',
         source: 'reconcile',
         qty: row.qty,
+        detail: { avg_cost: pos?.avg_cost ?? null },
       });
       actions.push({ reservation_id: row.id, action: 'filled', symbol_key: row.symbol_key });
       continue;
