@@ -16,6 +16,7 @@ Documentation lives here so Cursor and humans can find it. **Root README.md** st
 | **JOB-APPLICANT-WORKFLOW.md** | Job Applicant pipeline: four agents, profile intake, tools, Sheets/GDrive/Playwright plan, setup via `scripts/setup-job-applicant-agents.js`. |
 | **DEPLOY-CENTOS-PODMAN.md** | Production deploy on CentOS/RHEL with Podman Compose: SELinux, firewall, volumes, OpenClaw/Chromium, browser login, optional profiles. |
 | **knowledgeGraph.md** | Neo4j knowledge graph for internal OpenClaw agent behavior, Kanban feedback, autonomous self-improvement, and progressive improvement dashboard. |
+| **IBKR-TRADING-WORKFLOW.md** | IBKR MCP options, maker/checker paper workflow (budget, brackets, CEO day plan), Agent OS wiring, env vars, and security guardrails. |
 
 ## Not in knowledgebase (stay at repo root or other paths)
 

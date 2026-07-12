@@ -62,6 +62,33 @@ const DEFAULT_TEST_BODIES = {
   summarize_url: { url: 'https://example.com' },
   generate_image: { prompt: 'a sunset over mountains' },
   generate_video: { prompt: 'waves on a beach' },
+  ibkr_gateway_ping: {},
+  ibkr_config: {},
+  ibkr_day_status: {},
+  ibkr_account_snapshot: {},
+  ibkr_preflight: {},
+  ibkr_validate_plan: {
+    plan: {
+      trades: [
+        {
+          key: 'PAXOS:BTC',
+          side: 'BUY',
+          qty: 0.001,
+          entry: 65000,
+          stop: 63000,
+          tp: 70000,
+          rationale: 'UI smoke-test plan — dry-run unless IBKR_TRADING_ENABLED=1.',
+        },
+      ],
+    },
+  },
+  ibkr_exit_candidates: { positions: [], max_hold_days: 5 },
+  ibkr_record_hold: { key: 'PAXOS:BTC', extend_days: 1, review: { decision: 'HOLD' } },
+  ibkr_record_holds_batch: { holds: [] },
+  ibkr_reserve: { trades_to_place: [], residual: [] },
+  ibkr_release: { reservation_id: 0, reason: 'ui-test' },
+  ibkr_confirm_fill: { reservation_id: 0 },
+  ibkr_place: { trades: [], dry_run: true, residual: [] },
 };
 
 export default function ContentToolsLogs() {
@@ -235,7 +262,10 @@ export default function ContentToolsLogs() {
                       <span style={{ marginLeft: '0.35rem', fontSize: '0.75rem', color: 'var(--muted)' }}>built-in</span>
                     ) : null}
                   </td>
-                  <td style={{ padding: '0.6rem 1rem', fontFamily: 'monospace', fontSize: '0.85rem', wordBreak: 'break-all' }}>{t.endpoint || '—'}</td>
+                  <td style={{ padding: '0.6rem 1rem', fontFamily: 'monospace', fontSize: '0.85rem', wordBreak: 'break-all' }}>
+                    <span style={{ color: 'var(--muted)', marginRight: '0.35rem' }}>{(t.method || 'POST').toUpperCase()}</span>
+                    {t.endpoint || '—'}
+                  </td>
                   <td style={{ padding: '0.6rem 1rem', color: 'var(--muted)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.purpose || ''}>{t.purpose || '—'}</td>
                   <td style={{ padding: '0.6rem 1rem', fontSize: '0.85rem' }}>{t.model_used || '—'}</td>
                   <td style={{ padding: '0.6rem 1rem' }}>

@@ -280,7 +280,7 @@ export function deleteCustomScript(id, authUser) {
   return { ok: true, id };
 }
 
-export async function executeCustomScript(scriptId, authUser, { inputs = {}, context = {} } = {}) {
+export async function executeCustomScript(scriptId, authUser, { inputs = {}, context = {}, timeoutMs } = {}) {
   const db = getDb();
   const row = getApprovedScriptForRun(scriptId, authUser?.id);
   if (!row) throw new Error('Approved script not found or not accessible');
@@ -292,6 +292,7 @@ export async function executeCustomScript(scriptId, authUser, { inputs = {}, con
     runtimeProfile: row.runtime_profile,
     inputs,
     context,
+    timeoutMs,
   });
 
   const now = new Date().toISOString();
@@ -325,13 +326,51 @@ export async function executeCustomScriptTask(resolvedInputs, nodeConfig = {}, c
     run_id: context?.run_id || null,
     node_outputs: context?.node_outputs || {},
     initial_input: context?.initial_input || '',
+    workflow_variables: context?.workflow_variables || context?.variables || {},
+    variables: context?.workflow_variables || context?.variables || {},
   };
-  const result = await executeCustomScript(scriptId, authUser, { inputs, context: runContext });
+  const result = await executeCustomScript(scriptId, authUser, {
+    inputs,
+    context: runContext,
+    timeoutMs: nodeConfig.timeoutMs || nodeConfig.timeout_ms,
+  });
   const out = result.output || {};
+  // Explicit fields must win over ...out (scripts sometimes echo nested decision JSON)
+  const decision = out.decision != null ? String(out.decision) : '';
+  let adjustments = out.adjustments != null ? out.adjustments : '';
+  if (Array.isArray(adjustments)) adjustments = adjustments.join('\n');
+  else if (adjustments != null && typeof adjustments === 'object') adjustments = JSON.stringify(adjustments);
+  else adjustments = String(adjustments || '');
+  // If checker put the whole JSON into adjustments, unwrap
+  if (adjustments.trim().startsWith('{')) {
+    try {
+      const nested = JSON.parse(adjustments);
+      if (nested && typeof nested === 'object') {
+        if (nested.adjustments != null) {
+          adjustments = Array.isArray(nested.adjustments)
+            ? nested.adjustments.join('\n')
+            : String(nested.adjustments);
+        } else if (nested.notes != null && !adjustments) {
+          adjustments = String(nested.notes);
+        }
+      }
+    } catch {
+      /* keep raw */
+    }
+  }
+  if (!adjustments && out.notes) adjustments = String(out.notes);
   return {
+    ...out,
     text: out.text != null ? String(out.text) : JSON.stringify(out),
     result: out,
-    ok: true,
+    ok: out.ok !== false && out.ok !== 'false',
+    decision,
+    adjustments,
+    plan_json: out.plan_json != null ? String(out.plan_json) : '',
+    has_sells: out.has_sells != null ? String(out.has_sells) : '',
+    has_holds: out.has_holds != null ? String(out.has_holds) : '',
+    place_body: out.place_body != null ? String(out.place_body) : '',
+    holds_body: out.holds_body != null ? String(out.holds_body) : '',
     script_id: scriptId,
     language: result.language,
   };

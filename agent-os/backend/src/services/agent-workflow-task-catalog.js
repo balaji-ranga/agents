@@ -1,6 +1,7 @@
 /**
  * Standard workflow task catalog — input/output schemas for built-in tasks.
  */
+import { withNodeTimeoutConfigFields, DEFAULT_NODE_TIMEOUT_MS } from './agent-workflow-node-timeout.js';
 
 export const WORKFLOW_TASK_TYPES = {
   trigger: {
@@ -41,7 +42,7 @@ export const WORKFLOW_TASK_TYPES = {
       { id: 'result', label: 'Full MCP result JSON' },
       { id: 'ok', label: 'Success' },
     ],
-    configFields: [
+    configFields: withNodeTimeoutConfigFields([
       { id: 'mcpInvokeKind', label: 'Invoke kind', type: 'select', options: ['tool', 'prompt', 'resource'], default: 'tool' },
       { id: 'mcpServerId', label: 'MCP server', type: 'text' },
       { id: 'toolName', label: 'Tool name', type: 'text' },
@@ -49,7 +50,7 @@ export const WORKFLOW_TASK_TYPES = {
       { id: 'resourceUri', label: 'Resource URI', type: 'text' },
       { id: 'staticArguments', label: 'Static arguments (JSON)', type: 'textarea', placeholder: '{}' },
       { id: 'httpHeadersJson', label: 'HTTP headers (JSON)', type: 'textarea', placeholder: '{}' },
-    ],
+    ]),
   },
   mcp_listen: {
     type: 'sse_listen',
@@ -153,11 +154,10 @@ export const WORKFLOW_TASK_TYPES = {
       { id: 'body', label: 'Response body' },
       { id: 'ok', label: 'Success (2xx)' },
     ],
-    configFields: [
+    configFields: withNodeTimeoutConfigFields([
       { id: 'method', label: 'HTTP method', type: 'select', options: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], default: 'POST' },
-      { id: 'timeoutMs', label: 'Timeout (ms)', type: 'number', default: 60000 },
       { id: 'authType', label: 'Auth type', type: 'select', options: ['none', 'basic', 'bearer', 'api_key'], default: 'none' },
-    ],
+    ]),
   },
   externalAgent: {
     type: 'externalAgent',
@@ -286,7 +286,7 @@ export const WORKFLOW_TASK_TYPES = {
       { id: 'custom_script_ran', label: 'Custom script executed' },
       { id: 'custom_script_output', label: 'Custom script output JSON' },
     ],
-    configFields: [
+    configFields: withNodeTimeoutConfigFields([
       {
         id: 'modelSource',
         label: 'Model source',
@@ -327,7 +327,7 @@ export const WORKFLOW_TASK_TYPES = {
         default: 'off',
       },
       { id: 'customScriptId', label: 'Custom script ID', type: 'text', placeholder: 'script-my-graph-abc123' },
-    ],
+    ]),
   },
   custom_script: {
     type: 'custom_script',
@@ -348,10 +348,10 @@ export const WORKFLOW_TASK_TYPES = {
       { id: 'ok', label: 'Success' },
       { id: 'script_id', label: 'Script ID' },
     ],
-    configFields: [
+    configFields: withNodeTimeoutConfigFields([
       { id: 'customScriptId', label: 'Custom script', type: 'text' },
       { id: 'customScriptName', label: 'Script name (display)', type: 'text' },
-    ],
+    ]),
   },
 };
 
@@ -385,7 +385,14 @@ export function defaultNodeConfig(type) {
   }
   if (type === 'api') {
     config.method = config.method || 'POST';
-    config.timeoutMs = config.timeoutMs || 60000;
+    config.timeoutMs = config.timeoutMs || DEFAULT_NODE_TIMEOUT_MS;
+    config.timeoutAction = config.timeoutAction || 'fail';
+    config.defaultTimeoutOutput = config.defaultTimeoutOutput || '{}';
+  }
+  if (type === 'brain' || type === 'mcp_tool' || type === 'custom_script') {
+    config.timeoutMs = config.timeoutMs || DEFAULT_NODE_TIMEOUT_MS;
+    config.timeoutAction = config.timeoutAction || 'fail';
+    config.defaultTimeoutOutput = config.defaultTimeoutOutput || '{}';
   }
   if (type === 'email') {
     config.useEnvSmtp = config.useEnvSmtp !== false;

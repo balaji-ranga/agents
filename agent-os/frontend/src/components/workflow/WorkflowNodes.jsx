@@ -310,6 +310,9 @@ export function defaultNodeData(type, extra = {}) {
     data.taskConfig = {
       customScriptId: '',
       customScriptName: '',
+      timeoutMs: 1200000,
+      timeoutAction: 'fail',
+      defaultTimeoutOutput: '{}',
       ...(data.taskConfig || {}),
     };
     data.inputBindings = data.inputBindings?.length
@@ -333,7 +336,9 @@ export function defaultNodeData(type, extra = {}) {
       apiKeyHeader: 'X-API-Key',
       apiKeyValue: '',
       httpHeadersJson: '{}',
-      timeoutMs: 60000,
+      timeoutMs: 1200000,
+      timeoutAction: 'fail',
+      defaultTimeoutOutput: '{}',
     };
     data.inputBindings = [
       { id: 'url', label: 'URL', mode: 'static', value: '', sourceNodeId: '', sourceOutputKey: 'text' },
@@ -373,6 +378,9 @@ export function defaultNodeData(type, extra = {}) {
       mcpMaxToolRounds: 8,
       customScriptMode: 'off',
       customScriptId: '',
+      timeoutMs: 1200000,
+      timeoutAction: 'fail',
+      defaultTimeoutOutput: '{}',
     };
   }
   if (type === 'sse_listen' || type === 'mcp_listen') {
@@ -410,6 +418,9 @@ export function defaultNodeData(type, extra = {}) {
       resourceUri: '',
       staticArguments: '{}',
       httpHeadersJson: '{}',
+      timeoutMs: 1200000,
+      timeoutAction: 'fail',
+      defaultTimeoutOutput: '{}',
     };
   }
   if (type === 'ceo_approval') {

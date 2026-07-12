@@ -177,12 +177,20 @@ export function InputOutputPanel({ node, taskCatalog, allNodes, edges, onChange 
               return true;
             });
         if (!configFields.length) return null;
+        const selectLabel = (f, o) => {
+          if (f.id === 'timeoutAction') {
+            if (o === 'fail') return 'Fail the run';
+            if (o === 'default_output') return 'Pass default output to next node';
+          }
+          return o;
+        };
         return (
           <>
             <h4 style={{ marginTop: '1rem' }}>Task configuration</h4>
             {configFields.map((f) => (
               <label key={f.id} className="wf-field">
                 {f.label}
+                {f.description ? <small style={{ display: 'block', color: 'var(--muted)' }}>{f.description}</small> : null}
                 {f.type === 'boolean' ? (
                   <input
                     type="checkbox"
@@ -193,14 +201,21 @@ export function InputOutputPanel({ node, taskCatalog, allNodes, edges, onChange 
                   <select value={taskConfig[f.id] || f.default || ''} onChange={(e) => setConfig({ [f.id]: e.target.value })}>
                     {(f.options || []).map((o) => (
                       <option key={o} value={o}>
-                        {o}
+                        {selectLabel(f, o)}
                       </option>
                     ))}
                   </select>
+                ) : f.type === 'textarea' ? (
+                  <textarea
+                    rows={3}
+                    value={taskConfig[f.id] ?? f.default ?? ''}
+                    onChange={(e) => setConfig({ [f.id]: e.target.value })}
+                    placeholder={f.placeholder || ''}
+                  />
                 ) : (
                   <input
                     type={f.type === 'number' ? 'number' : f.type === 'password' ? 'password' : 'text'}
-                    value={taskConfig[f.id] ?? ''}
+                    value={taskConfig[f.id] ?? (f.default ?? '')}
                     onChange={(e) =>
                       setConfig({ [f.id]: f.type === 'number' ? Number(e.target.value) : e.target.value })
                     }

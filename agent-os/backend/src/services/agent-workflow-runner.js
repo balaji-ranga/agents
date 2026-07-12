@@ -37,6 +37,12 @@ import { resolveSseStreamUrl } from './sse-stream.js';
 import { getDownstreamNodeIds } from './agent-workflow-graph-utils.js';
 import { getPublicBaseUrl } from '../config/public-url.js';
 import { executeSubWorkflowTask } from './agent-workflow-sub-workflow.js';
+import {
+  resolveNodeTimeoutConfig,
+  withNodeTimeout,
+  isNodeTimeoutError,
+  buildTimeoutFallbackOutputs,
+} from './agent-workflow-node-timeout.js';
 
 function db() {
   return getDb();
@@ -115,17 +121,91 @@ function getOutgoingEdges(graph, nodeId) {
   return graph.edges.filter((e) => e.source === nodeId);
 }
 
+/**
+ * Complete a timed node: race work against timeoutMs; on timeout either fail the run
+ * or continue with defaultTimeoutOutput (timeoutAction=default_output).
+ */
+async function completeTimedNodeStep({
+  runId,
+  node,
+  nodeId,
+  def,
+  runRow,
+  context,
+  inputRecord,
+  work,
+  kanban,
+}) {
+  const config = node.data?.taskConfig || node.data?.config || {};
+  const { timeoutMs, timeoutAction, defaultOutput } = resolveNodeTimeoutConfig(config);
+  upsertStep(runId, node, 'in_progress', { input: inputRecord });
+  try {
+    const outputs = await withNodeTimeout(work(), timeoutMs);
+    storeNodeOutput(context, node.id, outputs);
+    saveContext(runId, context);
+    upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
+    if (kanban) {
+      const meta = typeof kanban === 'function' ? kanban(outputs) : kanban;
+      upsertCompletedStepKanban({
+        runId,
+        definitionId: def.id,
+        definitionName: def.name,
+        nodeId: node.id,
+        nodeLabel: meta.nodeLabel || node.data?.label || node.type,
+        nodeType: node.type,
+        agentId: null,
+        ownerUserId: runRow.owner_user_id,
+        summary: meta.summary || '',
+        detail: meta.detail || {},
+      });
+    }
+    updateRunProgress(runId);
+    await advanceFromNode(runId, nodeId);
+  } catch (err) {
+    if (isNodeTimeoutError(err) && timeoutAction === 'default_output') {
+      const outputs = buildTimeoutFallbackOutputs(node.type, defaultOutput, timeoutMs);
+      storeNodeOutput(context, node.id, outputs);
+      saveContext(runId, context);
+      upsertStep(runId, node, 'completed', {
+        output: buildStepOutputRecord(outputs),
+        error_message: err.message,
+      });
+      if (kanban) {
+        const meta = typeof kanban === 'function' ? kanban(outputs) : kanban;
+        upsertCompletedStepKanban({
+          runId,
+          definitionId: def.id,
+          definitionName: def.name,
+          nodeId: node.id,
+          nodeLabel: meta.nodeLabel || node.data?.label || node.type,
+          nodeType: node.type,
+          agentId: null,
+          ownerUserId: runRow.owner_user_id,
+          summary: `Timed out — continued with default output (${Math.round(timeoutMs / 1000)}s)`,
+          detail: { ...(meta.detail || {}), timed_out: true, timeout_ms: timeoutMs },
+        });
+      }
+      updateRunProgress(runId);
+      await advanceFromNode(runId, nodeId);
+      return;
+    }
+    upsertStep(runId, node, 'failed', { error_message: err.message });
+    failRun(runId, err.message);
+  }
+}
+
 function isWhileLoopBodyNode(graph, nodeId) {
-  return getIncomingEdges(graph, nodeId).some((e) => {
-    const src = getNode(graph, e.source);
-    return src?.type === 'while' && (e.sourceHandle || 'default') === 'loop';
-  });
+  for (const n of graph.nodes || []) {
+    if (n.type !== 'while') continue;
+    if (getWhileLoopBodyNodeIds(graph, n.id).has(nodeId)) return true;
+  }
+  return false;
 }
 
 function getUpstreamWhileNode(graph, nodeId) {
-  for (const edge of getIncomingEdges(graph, nodeId)) {
-    const src = getNode(graph, edge.source);
-    if (src?.type === 'while' && (edge.sourceHandle || 'default') === 'loop') return src;
+  for (const n of graph.nodes || []) {
+    if (n.type !== 'while') continue;
+    if (getWhileLoopBodyNodeIds(graph, n.id).has(nodeId)) return n;
   }
   return null;
 }
@@ -161,6 +241,23 @@ function resolveLoopStepIteration(node, graph, context) {
 /** Set during executeNode so upsertStep can append per-iteration rows for while loops. */
 let activeStepMeta = null;
 
+/** Nodes reachable from a while node's loop handle (body), excluding the while itself. */
+function getWhileLoopBodyNodeIds(graph, whileNodeId) {
+  const body = new Set();
+  const stack = getOutgoingEdges(graph, whileNodeId)
+    .filter((e) => (e.sourceHandle || 'default') === 'loop')
+    .map((e) => e.target);
+  while (stack.length) {
+    const id = stack.pop();
+    if (!id || id === whileNodeId || body.has(id)) continue;
+    body.add(id);
+    for (const e of getOutgoingEdges(graph, id)) {
+      if (e.target !== whileNodeId) stack.push(e.target);
+    }
+  }
+  return body;
+}
+
 function allPredecessorsComplete(runId, graph, nodeId) {
   const incoming = getIncomingEdges(graph, nodeId);
   if (!incoming.length) return true;
@@ -168,24 +265,58 @@ function allPredecessorsComplete(runId, graph, nodeId) {
   const node = getNode(graph, nodeId);
   let loopBackSources = null;
   if (node?.type === 'while') {
-    const loopTargets = new Set(
-      getOutgoingEdges(graph, nodeId)
-        .filter((e) => (e.sourceHandle || 'default') === 'loop')
-        .map((e) => e.target)
-    );
-    loopBackSources = new Set(incoming.filter((e) => loopTargets.has(e.source)).map((e) => e.source));
+    // Loop-back edges may come from any body node (not only the direct loop target),
+    // e.g. while → maker → checker → parse → while. Skip those on first entry.
+    const bodyIds = getWhileLoopBodyNodeIds(graph, nodeId);
+    loopBackSources = new Set(incoming.filter((e) => bodyIds.has(e.source)).map((e) => e.source));
   }
 
   for (const edge of incoming) {
     const step = getLatestStepRow(runId, edge.source);
+    const srcNode = getNode(graph, edge.source);
+
+    // Exclusive IF/While branches: skip edges for branches that were not taken
+    if (srcNode && (srcNode.type === 'if' || srcNode.type === 'while') && step) {
+      let branch = null;
+      try {
+        const out = typeof step.output_json === 'string' ? JSON.parse(step.output_json || '{}') : step.output_json;
+        // steps table may not expose output_json on getLatestStepRow — reload
+      } catch {
+        /* ignore */
+      }
+    }
+
     if (!step) {
       if (loopBackSources?.has(edge.source)) continue;
+      // IF/While source not executed yet — if another exclusive branch already completed this node path, wait
+      if (srcNode && (srcNode.type === 'if' || srcNode.type === 'while')) {
+        // source hasn't completed — cannot take this edge yet
+        return false;
+      }
       return false;
     }
-    const srcNode = getNode(graph, edge.source);
+
     const isListen = srcNode?.type === 'sse_listen' || srcNode?.type === 'mcp_listen';
     if (isListen && step.status === 'listening') continue;
     if (!['completed', 'skipped'].includes(step.status)) return false;
+
+    if (srcNode && (srcNode.type === 'if' || srcNode.type === 'while')) {
+      const full = db()
+        .prepare(`SELECT output_json FROM agent_workflow_run_steps WHERE id = ?`)
+        .get(step.id);
+      let branch = null;
+      try {
+        const out = JSON.parse(full?.output_json || '{}');
+        branch = out.branch || out.text || null;
+      } catch {
+        branch = null;
+      }
+      const handle = edge.sourceHandle || 'default';
+      if (branch != null && String(branch) !== String(handle)) {
+        // This exclusive branch was not taken — do not block the target
+        continue;
+      }
+    }
   }
   return true;
 }
@@ -379,7 +510,14 @@ export async function startAgentWorkflowRun(definitionId, ownerUserId, { trigger
       .get(definitionId)?.n) || 1;
 
   const standupId = ensureWorkflowStandup();
-  const context = { initial_input: input, node_outputs: {}, actor };
+  const context = {
+    initial_input: input,
+    node_outputs: {},
+    actor,
+    workflow_variables: def.variables || {},
+    variables: def.variables || {},
+    definition_id: definitionId,
+  };
 
   db()
     .prepare(
@@ -555,35 +693,27 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
     const ownerAuth = db()
       .prepare('SELECT id, role FROM platform_users WHERE id = ?')
       .get(runRow.owner_user_id) || { id: runRow.owner_user_id, role: 'ceo' };
-    upsertStep(runId, node, 'in_progress', { input: inputRecord });
-    try {
-      const outputs = await executeBrainTask(config, inputRecord.resolved, context, graph, { authUser: ownerAuth });
-      storeNodeOutput(context, node.id, outputs);
-      saveContext(runId, context);
-      upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
-      upsertCompletedStepKanban({
-        runId,
-        definitionId: def.id,
-        definitionName: def.name,
-        nodeId: node.id,
+    await completeTimedNodeStep({
+      runId,
+      node,
+      nodeId,
+      def,
+      runRow,
+      context,
+      inputRecord,
+      work: () => executeBrainTask(config, inputRecord.resolved, context, graph, { authUser: ownerAuth }),
+      kanban: (outputs) => ({
         nodeLabel: node.data?.label || 'Brain',
-        nodeType: 'brain',
-        agentId: null,
-        ownerUserId: runRow.owner_user_id,
         summary: (outputs.text || '').slice(0, 200),
         detail: {
           model: outputs.model_used,
           provider: outputs.provider,
           mcp_tools_available: outputs.mcp_tools_available,
           mcp_tool_calls: outputs.mcp_tool_calls,
+          timed_out: outputs.timed_out || false,
         },
-      });
-      updateRunProgress(runId);
-      await advanceFromNode(runId, nodeId);
-    } catch (err) {
-      upsertStep(runId, node, 'failed', { error_message: err.message });
-      failRun(runId, err.message);
-    }
+      }),
+    });
     return;
   }
 
@@ -766,55 +896,49 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
     }
     const mergedArgs = { ...staticArgs, ...dynamicArgs };
 
-    upsertStep(runId, node, 'in_progress', { input: inputRecord });
-    try {
-      const nodeAuth = parseMcpAuthFromNodeConfig(config);
-      let out;
-      let stepLabel;
-      if (invokeKind === 'prompt') {
-        out = await callMcpServerPrompt(mcpServerId, promptName, mergedArgs, ownerAuth, nodeAuth);
-        stepLabel = `MCP prompt ${promptName}`;
-      } else if (invokeKind === 'resource') {
-        const uriFromInput = inputRecord.resolved?.uri || inputRecord.resolved?.resource_uri;
-        const uri = String(uriFromInput || resourceUri || '').trim();
-        if (!uri) throw new Error('Resource URI required');
-        out = await callMcpServerResource(mcpServerId, uri, ownerAuth, nodeAuth);
-        stepLabel = `MCP resource ${uri}`;
-      } else {
-        out = await callMcpServerTool(mcpServerId, toolName, mergedArgs, ownerAuth, nodeAuth);
-        stepLabel = `MCP ${toolName}`;
-      }
-      if (out.is_error) {
-        throw new Error(out.text || `${stepLabel} returned an error`);
-      }
-      const outputs = {
-        text: out.text || '',
-        result: out.result,
-        ok: !out.is_error,
-        latency_ms: out.latency_ms,
-        invoke_kind: invokeKind,
-      };
-      storeNodeOutput(context, node.id, outputs);
-      saveContext(runId, context);
-      upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
-      upsertCompletedStepKanban({
-        runId,
-        definitionId: def.id,
-        definitionName: def.name,
-        nodeId: node.id,
-        nodeLabel: node.data?.label || stepLabel,
-        nodeType: 'mcp_tool',
-        agentId: null,
-        ownerUserId: runRow.owner_user_id,
-        summary: `${stepLabel} completed`,
-        detail: { mcp_server_id: mcpServerId, invoke_kind: invokeKind, ok: outputs.ok },
-      });
-      updateRunProgress(runId);
-      await advanceFromNode(runId, nodeId);
-    } catch (err) {
-      upsertStep(runId, node, 'failed', { error_message: err.message });
-      failRun(runId, err.message);
-    }
+    await completeTimedNodeStep({
+      runId,
+      node,
+      nodeId,
+      def,
+      runRow,
+      context,
+      inputRecord,
+      work: async () => {
+        const nodeAuth = parseMcpAuthFromNodeConfig(config);
+        let out;
+        let stepLabel;
+        if (invokeKind === 'prompt') {
+          out = await callMcpServerPrompt(mcpServerId, promptName, mergedArgs, ownerAuth, nodeAuth);
+          stepLabel = `MCP prompt ${promptName}`;
+        } else if (invokeKind === 'resource') {
+          const uriFromInput = inputRecord.resolved?.uri || inputRecord.resolved?.resource_uri;
+          const uri = String(uriFromInput || resourceUri || '').trim();
+          if (!uri) throw new Error('Resource URI required');
+          out = await callMcpServerResource(mcpServerId, uri, ownerAuth, nodeAuth);
+          stepLabel = `MCP resource ${uri}`;
+        } else {
+          out = await callMcpServerTool(mcpServerId, toolName, mergedArgs, ownerAuth, nodeAuth);
+          stepLabel = `MCP ${toolName}`;
+        }
+        if (out.is_error) {
+          throw new Error(out.text || `${stepLabel} returned an error`);
+        }
+        return {
+          text: out.text || '',
+          result: out.result,
+          ok: !out.is_error,
+          latency_ms: out.latency_ms,
+          invoke_kind: invokeKind,
+          _stepLabel: stepLabel,
+        };
+      },
+      kanban: (outputs) => ({
+        nodeLabel: node.data?.label || outputs._stepLabel || 'MCP',
+        summary: `${outputs._stepLabel || 'MCP'} completed`,
+        detail: { mcp_server_id: mcpServerId, invoke_kind: invokeKind, ok: outputs.ok, timed_out: !!outputs.timed_out },
+      }),
+    });
     return;
   }
 
@@ -935,30 +1059,24 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
   if (node.type === 'api') {
     const inputRecord = buildStepInputRecord(node, graph, context);
     const config = node.data?.taskConfig || node.data?.config || {};
-    upsertStep(runId, node, 'in_progress', { input: inputRecord });
-    try {
-      const outputs = await executeApiTask(inputRecord.resolved, config, context);
-      storeNodeOutput(context, node.id, outputs);
-      saveContext(runId, context);
-      upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
-      upsertCompletedStepKanban({
-        runId,
-        definitionId: def.id,
-        definitionName: def.name,
-        nodeId: node.id,
+    const { timeoutMs } = resolveNodeTimeoutConfig(config);
+    await completeTimedNodeStep({
+      runId,
+      node,
+      nodeId,
+      def,
+      runRow,
+      context,
+      inputRecord,
+      work: () => executeApiTask(inputRecord.resolved, { ...config, timeoutMs }, context),
+      kanban: (outputs) => ({
         nodeLabel: node.data?.label || 'Call API',
-        nodeType: 'api',
-        agentId: null,
-        ownerUserId: runRow.owner_user_id,
-        summary: `API ${outputs.status} ${outputs.ok ? 'ok' : 'failed'}`,
+        summary: outputs.timed_out
+          ? `API timed out (${Math.round(timeoutMs / 1000)}s)`
+          : `API ${outputs.status} ${outputs.ok ? 'ok' : 'failed'}`,
         detail: { inputs: inputRecord.summary, outputs },
-      });
-      updateRunProgress(runId);
-      await advanceFromNode(runId, nodeId);
-    } catch (err) {
-      upsertStep(runId, node, 'failed', { error_message: err.message });
-      failRun(runId, err.message);
-    }
+      }),
+    });
     return;
   }
 
@@ -1002,35 +1120,28 @@ async function executeNode(runId, nodeId, graph, context, def, runRow) {
   if (node.type === 'custom_script') {
     const inputRecord = buildStepInputRecord(node, graph, context);
     const config = node.data?.taskConfig || node.data?.config || {};
-    upsertStep(runId, node, 'in_progress', { input: inputRecord });
-    try {
-      const outputs = await executeCustomScriptTask(
-        inputRecord.resolved,
-        config,
-        { ...context, run_id: runId, definition_id: def.id },
-        runRow.owner_user_id
-      );
-      storeNodeOutput(context, node.id, outputs);
-      saveContext(runId, context);
-      upsertStep(runId, node, 'completed', { output: buildStepOutputRecord(outputs) });
-      upsertCompletedStepKanban({
-        runId,
-        definitionId: def.id,
-        definitionName: def.name,
-        nodeId: node.id,
+    const { timeoutMs } = resolveNodeTimeoutConfig(config);
+    await completeTimedNodeStep({
+      runId,
+      node,
+      nodeId,
+      def,
+      runRow,
+      context,
+      inputRecord,
+      work: () =>
+        executeCustomScriptTask(
+          inputRecord.resolved,
+          { ...config, timeoutMs },
+          { ...context, run_id: runId, definition_id: def.id },
+          runRow.owner_user_id
+        ),
+      kanban: (outputs) => ({
         nodeLabel: node.data?.label || 'Custom Script',
-        nodeType: 'custom_script',
-        agentId: null,
-        ownerUserId: runRow.owner_user_id,
         summary: `Script ${config.customScriptName || config.customScriptId}: ${(outputs.text || '').slice(0, 80)}`,
         detail: { inputs: inputRecord.summary, outputs },
-      });
-      updateRunProgress(runId);
-      await advanceFromNode(runId, nodeId);
-    } catch (err) {
-      upsertStep(runId, node, 'failed', { error_message: err.message });
-      failRun(runId, err.message);
-    }
+      }),
+    });
     return;
   }
 

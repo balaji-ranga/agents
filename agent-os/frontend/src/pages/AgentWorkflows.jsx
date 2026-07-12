@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { formatLocalDateTime } from '../utils/formatDateTime.js';
 import { api } from '../api.js';
@@ -7,6 +7,12 @@ import { summarizeStepIo } from '../utils/workflowStepIo.js';
 import ActionFeedbackBanner from '../components/ActionFeedbackBanner.jsx';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import WorkflowAgentChat from '../components/workflow/WorkflowAgentChat.jsx';
+import {
+  buildWorkflowExportDocument,
+  downloadWorkflowJson,
+  parseWorkflowImportDocument,
+  readJsonFile,
+} from '../utils/workflowDefinitionJson.js';
 
 const STATUS_COLORS = {
   completed: '#16a34a',
@@ -58,6 +64,7 @@ export default function AgentWorkflows() {
   const [newName, setNewName] = useState('');
   const [templates, setTemplates] = useState([]);
   const [selectedTemplate, setSelectedTemplate] = useState('');
+  const importFileRef = useRef(null);
 
   const loadTemplates = useCallback(() => {
     return api.agentWorkflowTemplates().then((tplRes) => setTemplates(tplRes.templates || []));
@@ -179,6 +186,56 @@ export default function AgentWorkflows() {
       navigate(`/workflows/${wf.id}/edit`);
     } catch (e) {
       showError(e.message || 'Failed to create workflow');
+    }
+  };
+
+  const exportWorkflowJson = async (wf) => {
+    setBusy(`export-${wf.id}`);
+    try {
+      const full = await api.agentWorkflowGet(wf.id);
+      const doc = buildWorkflowExportDocument({
+        name: full.name,
+        description: full.description,
+        graph: full.draft_graph,
+        variables: full.variables || {},
+        trigger_modes: full.trigger_modes,
+        schedule_cron: full.schedule_cron,
+        chat_trigger_phrase: full.chat_trigger_phrase,
+        source_id: full.id,
+      });
+      downloadWorkflowJson(doc, full.name || full.id);
+      showSuccess(`Exported "${full.name}"`);
+    } catch (e) {
+      showError(e.message || 'Failed to export workflow');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const importWorkflowJson = async (file) => {
+    if (!file) return;
+    setBusy('import-json');
+    try {
+      const raw = await readJsonFile(file);
+      const parsed = parseWorkflowImportDocument(raw);
+      const name = newName.trim() || parsed.name;
+      const wf = await api.agentWorkflowCreate({
+        name,
+        description: parsed.description,
+        graph: parsed.graph,
+        variables: parsed.variables,
+        trigger_modes: parsed.trigger_modes,
+        schedule_cron: parsed.schedule_cron,
+        chat_trigger_phrase: parsed.chat_trigger_phrase,
+      });
+      setNewName('');
+      showSuccess(`Imported "${wf.name}"`);
+      navigate(`/workflows/${wf.id}/edit`);
+    } catch (e) {
+      showError(e.message || 'Failed to import workflow JSON');
+    } finally {
+      setBusy(null);
+      if (importFileRef.current) importFileRef.current.value = '';
     }
   };
 
@@ -311,6 +368,13 @@ export default function AgentWorkflows() {
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <input
+            ref={importFileRef}
+            type="file"
+            accept="application/json,.json,.workflow.json"
+            style={{ display: 'none' }}
+            onChange={(e) => importWorkflowJson(e.target.files?.[0])}
+          />
           <select
             value={selectedTemplate}
             onChange={(e) => setSelectedTemplate(e.target.value)}
@@ -337,6 +401,15 @@ export default function AgentWorkflows() {
             disabled={!selectedTemplate && !newName.trim()}
           >
             + New workflow
+          </button>
+          <button
+            type="button"
+            className="wf-btn"
+            disabled={busy === 'import-json'}
+            onClick={() => importFileRef.current?.click()}
+            title="Create a new workflow from a .workflow.json export"
+          >
+            Import JSON
           </button>
         </div>
       </header>
@@ -386,6 +459,15 @@ export default function AgentWorkflows() {
                 <Link to={`/workflows/${wf.id}/edit`} className="wf-btn">
                   Edit
                 </Link>
+                <button
+                  type="button"
+                  className="wf-btn"
+                  disabled={busy === `export-${wf.id}`}
+                  onClick={() => exportWorkflowJson(wf)}
+                  title="Download workflow definition as JSON"
+                >
+                  Export JSON
+                </button>
                 <button
                   type="button"
                   className="wf-btn-accent"

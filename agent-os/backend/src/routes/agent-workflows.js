@@ -19,6 +19,7 @@ import {
 import { getHookInfo } from '../services/agent-workflow-webhooks.js';
 import { runWorkflowBuilderChat, getWorkflowBuilderChatHistory } from '../services/agent-workflow-agent.js';
 import { applyWorkflowBuilderActions, getWorkflowDraftForAgent } from '../services/agent-workflow-builder.js';
+import { getBrainHistory } from '../services/agent-workflow-brain-history.js';
 
 const router = Router();
 
@@ -29,6 +30,52 @@ function actorFromRequest(req) {
     type: req.authUser?.role || 'user',
   };
 }
+
+/** Workflow API nodes may call with x-internal-test; otherwise CEO/admin auth. */
+function allowInternalOrCeo(req, res, next) {
+  if (req.headers['x-internal-test'] === '1') {
+    req.authUser = req.authUser || {
+      id: req.body?.owner_user_id || process.env.AGENT_OS_BALA_CEO_ID || 'ceo-bala',
+      role: 'ceo',
+    };
+    return next();
+  }
+  return requireCeoOrAdmin(req, res, next);
+}
+
+/**
+ * POST/GET /api/agent-workflows/brain-history
+ * Query Brain node I/O from run-step audit.
+ * Body/query: workflow_id[], node_id[], days, response_type=actual|summarized, limit
+ */
+async function brainHistoryHandler(req, res) {
+  try {
+    const src = req.method === 'GET' ? req.query : req.body || {};
+    let ownerUserId = src.owner_user_id || req.authUser?.id || null;
+    if (!ownerUserId) {
+      try {
+        ownerUserId = resolveAuthenticatedCeoUserId(req, src);
+      } catch {
+        ownerUserId = process.env.AGENT_OS_BALA_CEO_ID || 'ceo-bala';
+      }
+    }
+    const result = await getBrainHistory({
+      ownerUserId,
+      workflowIds: src.workflow_id ?? src.workflow_ids ?? src.workflowId,
+      nodeIds: src.node_id ?? src.node_ids ?? src.nodeId,
+      days: src.days != null ? Number(src.days) : 7,
+      limit: src.limit != null ? Number(src.limit) : 40,
+      responseType: src.response_type || src.responseType || 'actual',
+      purpose: src.purpose || undefined,
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+}
+
+router.post('/brain-history', allowInternalOrCeo, brainHistoryHandler);
+router.get('/brain-history', allowInternalOrCeo, brainHistoryHandler);
 
 router.use(requireCeoOrAdmin);
 
@@ -142,10 +189,20 @@ router.get('/draft/:id', (req, res) => {
 router.post('/', (req, res) => {
   try {
     const ownerUserId = resolveAuthenticatedCeoUserId(req, req.body);
-    const { name, description, graph, template_id: templateId } = req.body || {};
+    const {
+      name,
+      description,
+      graph,
+      template_id: templateId,
+      variables,
+      trigger_modes,
+      schedule_cron,
+      chat_trigger_phrase,
+    } = req.body || {};
     let workflowName = name?.trim();
     let workflowGraph = graph;
     let triggerPatch = {};
+    let workflowVariables = variables;
 
     if (templateId) {
       const template = getWorkflowTemplate(templateId);
@@ -157,6 +214,10 @@ router.post('/', (req, res) => {
         schedule_cron: template.default_schedule_cron || '',
         chat_trigger_phrase: template.default_chat_phrase || '',
       };
+    } else {
+      if (trigger_modes != null) triggerPatch.trigger_modes = trigger_modes;
+      if (schedule_cron != null) triggerPatch.schedule_cron = schedule_cron;
+      if (chat_trigger_phrase != null) triggerPatch.chat_trigger_phrase = chat_trigger_phrase;
     }
 
     if (!workflowName) return res.status(400).json({ error: 'name required' });
@@ -166,6 +227,7 @@ router.post('/', (req, res) => {
       ownerUserId,
       actor: actorFromRequest(req),
       graph: workflowGraph,
+      variables: workflowVariables,
       ...triggerPatch,
     });
     res.status(201).json(def);

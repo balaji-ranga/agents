@@ -170,14 +170,29 @@ router.post('/test/:name', attachToolsAuth, requireAuth, requireCeoOrAdmin, asyn
     const baseUrl = getBackendBaseUrl();
     let targetUrl = row.endpoint;
     if (targetUrl.startsWith('/')) targetUrl = baseUrl + targetUrl;
+    const method = String(row.method || 'POST').toUpperCase();
     const headers = { 'Content-Type': 'application/json' };
     if (targetUrl.startsWith(baseUrl)) headers['x-internal-test'] = '1';
-    const response = await fetch(targetUrl, {
-      method: row.method || 'POST',
+
+    const fetchOpts = {
+      method,
       headers,
-      body: JSON.stringify(body),
       signal: AbortSignal.timeout(60000),
-    });
+    };
+    if (method === 'GET' || method === 'HEAD') {
+      if (body && typeof body === 'object' && !Array.isArray(body) && Object.keys(body).length) {
+        const u = new URL(targetUrl);
+        for (const [k, v] of Object.entries(body)) {
+          if (v == null) continue;
+          u.searchParams.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+        }
+        targetUrl = u.toString();
+      }
+    } else {
+      fetchOpts.body = JSON.stringify(body);
+    }
+
+    const response = await fetch(targetUrl, fetchOpts);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) return res.status(response.status).json(data);
     res.json(data);

@@ -77,7 +77,7 @@ function apiEchoNode(id, label, x, y, bodySourceNodeId, bodySourceKey = 'text') 
         { id: 'body', label: 'Response body' },
         { id: 'ok', label: 'Success' },
       ],
-      taskConfig: { method: 'POST', authType: 'none', timeoutMs: 60000 },
+      taskConfig: { method: 'POST', authType: 'none', timeoutMs: 1200000, timeoutAction: 'fail', defaultTimeoutOutput: '{}' },
     },
   };
 }

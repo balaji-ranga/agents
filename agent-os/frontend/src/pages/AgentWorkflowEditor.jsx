@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   ReactFlow,
@@ -17,6 +17,7 @@ import { api } from '../api.js';
 import MaskedSecretInput from '../components/MaskedSecretInput.jsx';
 import HttpHeadersEditor from '../components/HttpHeadersEditor.jsx';
 import BrainMcpToolCallingPanel from '../components/workflow/BrainMcpToolCallingPanel.jsx';
+import WorkflowVariablesPanel from '../components/workflow/WorkflowVariablesPanel.jsx';
 import {
   workflowNodeTypes,
   PALETTE_ITEMS,
@@ -35,6 +36,12 @@ import {
 import ActionFeedbackBanner from '../components/ActionFeedbackBanner.jsx';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { BRAIN_PROVIDER_PRESETS } from '../components/workflow/workflowTaskMeta.js';
+import {
+  buildWorkflowExportDocument,
+  downloadWorkflowJson,
+  parseWorkflowImportDocument,
+  readJsonFile,
+} from '../utils/workflowDefinitionJson.js';
 
 function migrateNodeWithCatalog(node, catalog) {
   const entry = catalog?.find((t) => t.type === node.type);
@@ -945,6 +952,8 @@ function EditorInner({ workflowId }) {
   const [audit, setAudit] = useState([]);
   const [saving, setSaving] = useState(false);
   const [inlineStatus, setInlineStatus] = useState(null);
+  const importFileRef = useRef(null);
+  const [variablesPanelKey, setVariablesPanelKey] = useState(0);
   const { feedback, showSuccess, showError, clearFeedback } = useActionFeedback();
   const [selectedId, setSelectedId] = useState(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState(null);
@@ -1239,6 +1248,83 @@ function EditorInner({ workflowId }) {
     };
   };
 
+  const exportWorkflowJson = () => {
+    try {
+      const triggerSettings = extractTriggerSettings();
+      const doc = buildWorkflowExportDocument({
+        name: workflow.name,
+        description: workflow.description,
+        graph: buildGraphPayload(),
+        variables: workflow.variables || {},
+        ...triggerSettings,
+        source_id: workflow.id,
+      });
+      downloadWorkflowJson(doc, workflow.name || workflow.id);
+      showSuccess('Workflow exported as JSON');
+    } catch (e) {
+      showError(e.message || 'Failed to export workflow');
+    }
+  };
+
+  const applyImportedWorkflow = (parsed) => {
+    const flow = graphToFlow(parsed.graph);
+    const modes = parsed.trigger_modes?.length ? parsed.trigger_modes : ['manual'];
+    const nodesWithTriggers = flow.nodes.map((n) => {
+      const migrated = migrateNodeWithCatalog(n, taskCatalog);
+      if (migrated.type !== 'trigger') return migrated;
+      return {
+        ...migrated,
+        data: {
+          ...migrated.data,
+          triggerModes: modes,
+          scheduleCron: modes.includes('schedule') ? parsed.schedule_cron || '' : '',
+          chatPhrase: modes.includes('chat') ? parsed.chat_trigger_phrase || '' : '',
+        },
+      };
+    });
+    setNodes(nodesWithTriggers);
+    setEdges(flow.edges);
+    setSelectedId(null);
+    setSelectedEdgeId(null);
+    setWorkflow((w) =>
+      w
+        ? {
+            ...w,
+            name: parsed.name || w.name,
+            description: parsed.description ?? w.description,
+            variables: parsed.variables || {},
+            trigger_modes: modes,
+            schedule_cron: parsed.schedule_cron || '',
+            chat_trigger_phrase: parsed.chat_trigger_phrase || '',
+          }
+        : w
+    );
+    setTimeout(() => seedHistory(), 0);
+    setVariablesPanelKey((k) => k + 1);
+  };
+
+  const importWorkflowJson = async (file) => {
+    if (!file) return;
+    try {
+      const raw = await readJsonFile(file);
+      const parsed = parseWorkflowImportDocument(raw);
+      if (
+        !window.confirm(
+          `Replace the current draft with imported workflow "${parsed.name}" (${parsed.graph.nodes.length} nodes)? Unsaved canvas changes will be lost until you Save draft.`
+        )
+      ) {
+        return;
+      }
+      applyImportedWorkflow(parsed);
+      showSuccess(`Imported "${parsed.name}" — Save draft to persist`);
+      setInlineStatus({ type: 'success', message: 'Imported from JSON — Save draft to persist' });
+    } catch (e) {
+      showError(e.message || 'Failed to import workflow JSON');
+    } finally {
+      if (importFileRef.current) importFileRef.current.value = '';
+    }
+  };
+
   const saveDraft = async () => {
     setSaving(true);
     try {
@@ -1248,6 +1334,7 @@ function EditorInner({ workflowId }) {
         name: workflow.name,
         description: workflow.description,
         graph,
+        variables: workflow.variables || {},
         ...triggerSettings,
       });
       const final =
@@ -1276,6 +1363,7 @@ function EditorInner({ workflowId }) {
         name: workflow.name,
         description: workflow.description,
         graph,
+        variables: workflow.variables || {},
         ...triggerSettings,
       });
       const updated = await api.agentWorkflowPublish(workflowId);
@@ -1371,11 +1459,30 @@ function EditorInner({ workflowId }) {
         </div>
         <div className="wf-editor-actions">
           <input
+            ref={importFileRef}
+            type="file"
+            accept="application/json,.json,.workflow.json"
+            style={{ display: 'none' }}
+            onChange={(e) => importWorkflowJson(e.target.files?.[0])}
+          />
+          <input
             className="wf-run-input"
             placeholder="Run input (optional)"
             value={runInput}
             onChange={(e) => setRunInput(e.target.value)}
           />
+          <button type="button" className="wf-btn" onClick={exportWorkflowJson} disabled={saving}>
+            Export JSON
+          </button>
+          <button
+            type="button"
+            className="wf-btn"
+            onClick={() => importFileRef.current?.click()}
+            disabled={saving}
+            title="Replace draft graph from a .workflow.json export"
+          >
+            Import JSON
+          </button>
           <button type="button" className="wf-btn" onClick={saveDraft} disabled={saving}>
             Save draft
           </button>
@@ -1500,6 +1607,12 @@ function EditorInner({ workflowId }) {
             hookInfo={hookInfo}
             onChange={updateNodeData}
             onDelete={deleteNode}
+          />
+
+          <WorkflowVariablesPanel
+            key={`${workflowId}-${variablesPanelKey}`}
+            variables={workflow.variables || {}}
+            onChange={(variables) => setWorkflow((w) => (w ? { ...w, variables } : w))}
           />
 
           <div className="wf-audit">

@@ -45,15 +45,35 @@ export function resolveBrainInputPlaceholder(context, resolved = {}) {
   return first || '';
 }
 
-/** Replace {{input}}, {{nodeId.outputKey}} bind variables in system prompt. */
+/** Replace {{input}}, {{nodeId.outputKey}}, {{var.key}} in system prompt. */
 export function renderBrainPrompt(template, context, graph, resolved = {}) {
   if (!template) return '';
   let out = String(template);
   out = out.replace(/\{\{input\}\}/g, resolveBrainInputPlaceholder(context, resolved));
+  out = out.replace(/\{\{var(?:iables)?\.([\w.-]+)\}\}/g, (_, path) => {
+    const vars = context.workflow_variables || context.variables || {};
+    const parts = String(path).split('.');
+    let cur = vars;
+    for (const p of parts) {
+      if (cur == null) return '';
+      cur = cur[p];
+    }
+    if (cur == null) return '';
+    return typeof cur === 'object' ? JSON.stringify(cur) : String(cur);
+  });
   out = out.replace(/\{\{([\w.-]+)\.([\w.-]+)\}\}/g, (_, nodeId, key) => {
+    if (nodeId === 'var' || nodeId === 'variables') {
+      const vars = context.workflow_variables || context.variables || {};
+      const v = vars[key];
+      if (v == null) return '';
+      return typeof v === 'object' ? JSON.stringify(v) : String(v);
+    }
     const raw = context.node_outputs?.[nodeId];
     if (raw == null) return '';
-    if (typeof raw === 'object' && key in raw) return String(raw[key] ?? '');
+    if (typeof raw === 'object' && key in raw) {
+      const v = raw[key];
+      return v != null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
+    }
     if (key === 'text' && typeof raw === 'string') return raw;
     if (typeof raw === 'object' && raw.text != null) return String(raw.text);
     return typeof raw === 'string' ? raw : JSON.stringify(raw);
@@ -81,6 +101,16 @@ function parseToolArguments(raw) {
   }
 }
 
+function usesMaxCompletionTokens(model = '') {
+  const m = String(model).toLowerCase();
+  return /^(gpt-5|o[1-9]|o\d)/.test(m) || m.includes('gpt-5');
+}
+
+function openAiTokenLimitFields(model, maxTokens) {
+  if (usesMaxCompletionTokens(model)) return { max_completion_tokens: maxTokens };
+  return { max_tokens: maxTokens };
+}
+
 async function callOpenAiCompatible({
   baseUrl,
   apiKey,
@@ -100,8 +130,8 @@ async function callOpenAiCompatible({
   const res = await fetch(url, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ model, max_tokens: maxTokens, messages }),
-    signal: AbortSignal.timeout(120000),
+    body: JSON.stringify({ model, ...openAiTokenLimitFields(model, maxTokens), messages }),
+    signal: AbortSignal.timeout(provider === 'ollama' ? 300000 : 180000),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error?.message || data?.error || res.statusText);
@@ -140,7 +170,7 @@ async function runOpenAiWithMcpTools({
       headers,
       body: JSON.stringify({
         model,
-        max_tokens: maxTokens,
+        ...openAiTokenLimitFields(model, maxTokens),
         messages,
         tools: openAiTools,
         tool_choice: 'auto',
@@ -436,7 +466,9 @@ export async function executeBrainTask(taskConfig = {}, resolved = {}, context =
     text: result.text,
     model_used: result.model_used,
     provider: result.provider,
-    system_prompt_rendered: systemPrompt.slice(0, 500),
+    // Keep enough of the rendered prompt to debug {{node}} feedback injection (was 500 — truncated mid-allowlist)
+    system_prompt_rendered: systemPrompt.slice(0, 8000),
+    user_message_preview: String(userMessage || '').slice(0, 2000),
     mcp_tools_available: mcpEntries.length,
     mcp_tool_calls: result.toolCallLog || [],
     custom_script_ran: customScriptRan,
@@ -450,7 +482,8 @@ export async function executeBrainTask(taskConfig = {}, resolved = {}, context =
         text,
         model_used: 'custom_script',
         provider: 'custom_script',
-        system_prompt_rendered: systemPrompt?.slice(0, 500) || '',
+        system_prompt_rendered: systemPrompt?.slice(0, 8000) || '',
+        user_message_preview: String(userMessage || '').slice(0, 2000),
         mcp_tools_available: mcpEntries.length,
         mcp_tool_calls: [],
         custom_script_ran: true,

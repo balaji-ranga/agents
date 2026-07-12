@@ -9,8 +9,8 @@ function smtpFromEnv() {
     host: process.env.WORKFLOW_SMTP_HOST || '',
     port: Number(process.env.WORKFLOW_SMTP_PORT || 587),
     secure: process.env.WORKFLOW_SMTP_SECURE === '1' || process.env.WORKFLOW_SMTP_SECURE === 'true',
-    user: process.env.WORKFLOW_SMTP_USER || '',
-    pass: process.env.WORKFLOW_SMTP_PASS || '',
+    user: (process.env.WORKFLOW_SMTP_USER || '').trim(),
+    pass: (process.env.WORKFLOW_SMTP_PASS || '').trim(),
     from: process.env.WORKFLOW_SMTP_FROM || process.env.WORKFLOW_SMTP_USER || 'agent-os@localhost',
   };
 }
@@ -35,6 +35,15 @@ function resolveSmtpConfig(nodeConfig = {}) {
     pass: nodeConfig.smtpPass || '',
     from: nodeConfig.fromAddress || nodeConfig.smtpUser || 'agent-os@localhost',
   };
+}
+
+/** True when this line is the final line of a multiline SMTP reply (code + space). */
+function isSmtpReplyComplete(line) {
+  return line.length >= 4 && line[3] === ' ';
+}
+
+function isSmtpSuccess(code) {
+  return code >= 200 && code < 300;
 }
 
 /** Minimal SMTP client — attempts send; returns attempt result even on failure. */
@@ -70,7 +79,8 @@ function sendSmtpMail({ host, port, secure, user, pass, from, to, cc, subject, b
     let socket;
     let buffer = '';
     let stage = 'connect';
-    const responses = [];
+    let finished = false;
+    const useStartTls = port === 587 && !(secure && port === 465);
 
     function cleanup() {
       clearTimeout(timeout);
@@ -80,12 +90,91 @@ function sendSmtpMail({ host, port, secure, user, pass, from, to, cc, subject, b
     }
 
     function fail(err) {
+      if (finished) return;
+      finished = true;
       cleanup();
       resolve({ sent: false, attempted: true, error: err, messageId: null });
     }
 
+    function succeed(messageId, smtpReply) {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve({ sent: true, attempted: true, error: null, messageId, smtpReply: smtpReply || null, to: recipients });
+    }
+
     function send(line) {
       socket.write(`${line}\r\n`);
+    }
+
+    function beginAuthOrMail() {
+      if (user && pass) {
+        send('AUTH LOGIN');
+        stage = 'auth-user';
+      } else {
+        send(`MAIL FROM:<${from}>`);
+        stage = 'mail-from';
+      }
+    }
+
+    function onSmtpLine(line) {
+      const code = parseInt(line.slice(0, 3), 10);
+      if (Number.isNaN(code)) return;
+      if (!isSmtpReplyComplete(line) && code !== 334 && code !== 354) return;
+
+      if (stage === 'connect' && code === 220) {
+        send('EHLO agent-os');
+        stage = 'ehlo';
+      } else if ((stage === 'ehlo' || stage === 'ehlo-tls') && isSmtpSuccess(code)) {
+        if (useStartTls && stage === 'ehlo') {
+          send('STARTTLS');
+          stage = 'starttls';
+        } else {
+          beginAuthOrMail();
+        }
+      } else if (stage === 'starttls' && code === 220) {
+        socket.removeListener('data', onData);
+        const plain = socket;
+        socket = tlsConnect({ socket: plain, servername: host, rejectUnauthorized: false }, () => {
+          socket.on('data', onData);
+          send('EHLO agent-os');
+          stage = 'ehlo-tls';
+        });
+        socket.on('error', (e) => fail(e.message));
+      } else if (stage === 'auth-user' && code === 334) {
+        send(Buffer.from(user).toString('base64'));
+        stage = 'auth-pass';
+      } else if (stage === 'auth-pass' && code === 334) {
+        send(Buffer.from(pass).toString('base64'));
+        stage = 'auth-wait';
+      } else if (stage === 'auth-wait' && isSmtpSuccess(code)) {
+        send(`MAIL FROM:<${from}>`);
+        stage = 'mail-from';
+      } else if (stage === 'mail-from' && isSmtpSuccess(code)) {
+        send(`RCPT TO:<${to}>`);
+        stage = 'rcpt';
+      } else if (stage === 'rcpt' && isSmtpSuccess(code)) {
+        if (cc) {
+          send(`RCPT TO:<${cc}>`);
+          stage = 'rcpt-cc';
+        } else {
+          send('DATA');
+          stage = 'data-wait';
+        }
+      } else if (stage === 'rcpt-cc' && isSmtpSuccess(code)) {
+        send('DATA');
+        stage = 'data-wait';
+      } else if (stage === 'data-wait' && code === 354) {
+        send(message);
+        send('.');
+        stage = 'data-done';
+      } else if (stage === 'data-done' && isSmtpSuccess(code)) {
+        send('QUIT');
+        const mid = line.match(/queued as (\S+)/i)?.[1] || line.match(/<([^>]+)>/)?.[1] || null;
+        succeed(mid, line);
+      } else if (code >= 400) {
+        fail(line);
+      }
     }
 
     function onData(data) {
@@ -94,48 +183,7 @@ function sendSmtpMail({ host, port, secure, user, pass, from, to, cc, subject, b
       buffer = parts.pop() || '';
       for (const line of parts) {
         if (!line) continue;
-        responses.push(line);
-        const code = parseInt(line.slice(0, 3), 10);
-        if (Number.isNaN(code)) continue;
-
-        if (stage === 'connect' && code === 220) {
-          send(`EHLO agent-os`);
-          stage = 'ehlo';
-        } else if (stage === 'ehlo' && code >= 250) {
-          if (user && pass) {
-            send('AUTH LOGIN');
-            stage = 'auth-user';
-          } else {
-            send(`MAIL FROM:<${from}>`);
-            stage = 'mail-from';
-          }
-        } else if (stage === 'auth-user' && code === 334) {
-          send(Buffer.from(user).toString('base64'));
-          stage = 'auth-pass';
-        } else if (stage === 'auth-pass' && code === 334) {
-          send(Buffer.from(pass).toString('base64'));
-          stage = 'auth-wait';
-        } else if (stage === 'auth-wait' && code >= 250) {
-          send(`MAIL FROM:<${from}>`);
-          stage = 'mail-from';
-        } else if (stage === 'mail-from' && code >= 250) {
-          send(`RCPT TO:<${to}>`);
-          stage = 'rcpt';
-        } else if (stage === 'rcpt' && code >= 250) {
-          send('DATA');
-          stage = 'data-wait';
-        } else if (stage === 'data-wait' && code === 354) {
-          send(message);
-          send('.');
-          stage = 'data-done';
-        } else if (stage === 'data-done' && code >= 250) {
-          send('QUIT');
-          cleanup();
-          const mid = line.match(/queued as (\S+)/i)?.[1] || `local-${Date.now()}`;
-          resolve({ sent: true, attempted: true, error: null, messageId: mid, to: recipients });
-        } else if (code >= 400) {
-          fail(line);
-        }
+        onSmtpLine(line);
       }
     }
 
@@ -148,7 +196,7 @@ function sendSmtpMail({ host, port, secure, user, pass, from, to, cc, subject, b
       socket.on('data', onData);
       socket.on('error', (e) => fail(e.message));
       socket.on('close', () => {
-        if (stage !== 'data-done') fail(`Connection closed (${stage})`);
+        if (!finished && stage !== 'data-done') fail(`Connection closed (${stage})`);
       });
     } catch (e) {
       fail(e.message);
@@ -185,6 +233,7 @@ export async function executeEmailTask(resolvedInputs, nodeConfig = {}) {
     sent: !!result.sent,
     attempted: !!result.attempted,
     messageId: result.messageId || null,
+    smtpReply: result.smtpReply || null,
     error: result.error || null,
     to,
     subject,
@@ -207,7 +256,7 @@ export async function executeApiTask(resolvedInputs, nodeConfig = {}, context = 
   if (!url) throw new Error('API URL is required');
 
   const method = (cfg.method || 'POST').toUpperCase();
-  const timeoutMs = Number(cfg.timeoutMs || 60000);
+  const timeoutMs = Number(cfg.timeoutMs || 20 * 60 * 1000);
 
   let headers = buildApiRequestHeaders(cfg, context, resolvedInputs.headers);
 
@@ -245,6 +294,7 @@ export async function executeApiTask(resolvedInputs, nodeConfig = {}, context = 
     ok: true,
     status: response.status,
     body: parsed,
-    bodyText: text.slice(0, 5000),
+    // Keep full JSON for downstream API nodes (place/validate chains). Soft-cap huge payloads.
+    bodyText: (typeof parsed === 'object' ? JSON.stringify(parsed) : String(text)).slice(0, 200000),
   };
 }

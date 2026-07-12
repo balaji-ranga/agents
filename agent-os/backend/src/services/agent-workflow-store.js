@@ -31,6 +31,15 @@ function parseGraph(json) {
   }
 }
 
+function parseVariables(json) {
+  try {
+    const v = typeof json === 'string' ? JSON.parse(json || '{}') : json;
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
 function rowToDefinition(row) {
   if (!row) return null;
   return {
@@ -46,9 +55,25 @@ function rowToDefinition(row) {
     trigger_modes: (row.trigger_modes || 'manual').split(',').map((s) => s.trim()).filter(Boolean),
     paused: !!row.paused,
     webhook_secret: row.webhook_secret || '',
+    variables: parseVariables(row.variables_json),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+/** Normalize workflow-level static variables (plain JSON object). */
+export function normalizeWorkflowVariables(input) {
+  if (input == null) return {};
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof input === 'object' && !Array.isArray(input)) return { ...input };
+  return {};
 }
 
 export function appendAudit(definitionId, { action, summary, changedBy, changedByName, diff = null }) {
@@ -103,17 +128,20 @@ export function createDefinition({
   trigger_modes = ['manual'],
   schedule_cron = '',
   chat_trigger_phrase = '',
+  variables = {},
+  id: forcedId = null,
 }) {
-  const id = slugify(name);
+  const id = forcedId || slugify(name);
   const normalized = normalizeTriggerSettings(trigger_modes, schedule_cron, chat_trigger_phrase);
   const draftGraph = syncTriggerNodeInGraph(
     graph || { nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
     normalized
   );
+  const varsJson = JSON.stringify(normalizeWorkflowVariables(variables));
   db()
     .prepare(
-      `INSERT INTO agent_workflow_definitions (id, name, description, owner_user_id, draft_graph_json, status, schedule_cron, chat_trigger_phrase, trigger_modes)
-       VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)`
+      `INSERT INTO agent_workflow_definitions (id, name, description, owner_user_id, draft_graph_json, status, schedule_cron, chat_trigger_phrase, trigger_modes, variables_json)
+       VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -123,7 +151,8 @@ export function createDefinition({
       JSON.stringify(draftGraph),
       normalized.schedule_cron,
       normalized.chat_trigger_phrase,
-      normalized.trigger_modes.join(',')
+      normalized.trigger_modes.join(','),
+      varsJson
     );
   appendAudit(id, {
     action: 'created',
@@ -147,15 +176,27 @@ export function updateDraft(id, ownerUserId, patch, actor) {
     patch.chat_trigger_phrase != null ? patch.chat_trigger_phrase : existing.chat_trigger_phrase
   );
   const { trigger_modes, schedule_cron, chat_trigger_phrase } = normalized;
+  const variables =
+    patch.variables != null ? normalizeWorkflowVariables(patch.variables) : existing.variables || {};
 
   db()
     .prepare(
       `UPDATE agent_workflow_definitions
        SET name = ?, description = ?, draft_graph_json = ?, schedule_cron = ?,
-           chat_trigger_phrase = ?, trigger_modes = ?, updated_at = datetime('now')
+           chat_trigger_phrase = ?, trigger_modes = ?, variables_json = ?, updated_at = datetime('now')
        WHERE id = ? AND owner_user_id = ?`
     )
-    .run(name, description, JSON.stringify(draftGraph), schedule_cron, chat_trigger_phrase, trigger_modes.join(','), id, ownerUserId);
+    .run(
+      name,
+      description,
+      JSON.stringify(draftGraph),
+      schedule_cron,
+      chat_trigger_phrase,
+      trigger_modes.join(','),
+      JSON.stringify(variables),
+      id,
+      ownerUserId
+    );
 
   appendAudit(id, {
     action: 'updated_draft',

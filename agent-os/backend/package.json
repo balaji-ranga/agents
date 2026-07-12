@@ -12,6 +12,7 @@
     "test:full": "node ../tests/api-full.js"
   },
   "dependencies": {
+    "@stoqey/ib": "^1.6.3",
     "better-sqlite3": "^11.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

@@ -1,0 +1,113 @@
+/**
+ * Initial variables written into IBKR workflow definitions by seed scripts.
+ * After seed, edit tickers/policy in the workflow Variables panel — not here / not .env.
+ */
+import { withDerivedAllowlistKeys } from '../src/services/ibkr-workflow-variables.js';
+
+/** Example paper universe for first-time seed only. */
+export const SEED_ALLOWLIST = [
+  {
+    key: 'NASDAQ:NVDA',
+    symbol: 'NVDA',
+    exchange: 'NASDAQ',
+    market: 'US',
+    currency: 'USD',
+    board_lot: 1,
+    sec_type: 'STK',
+  },
+  {
+    key: 'BATS:MAGS',
+    symbol: 'MAGS',
+    exchange: 'BATS',
+    market: 'US',
+    currency: 'USD',
+    board_lot: 1,
+    sec_type: 'STK',
+  },
+  {
+    key: 'NASDAQ:AMD',
+    symbol: 'AMD',
+    exchange: 'NASDAQ',
+    market: 'US',
+    currency: 'USD',
+    board_lot: 1,
+    sec_type: 'STK',
+  },
+  {
+    key: 'SGX:S68',
+    symbol: 'S68',
+    exchange: 'SGX',
+    market: 'SG',
+    currency: 'SGD',
+    board_lot: 100,
+    sec_type: 'STK',
+  },
+  {
+    key: 'SGX:S63',
+    symbol: 'S63',
+    exchange: 'SGX',
+    market: 'SG',
+    currency: 'SGD',
+    board_lot: 100,
+    sec_type: 'STK',
+  },
+  {
+    key: 'PAXOS:BTC',
+    symbol: 'BTC',
+    exchange: 'PAXOS',
+    market: 'CRYPTO',
+    currency: 'USD',
+    board_lot: 0.0001,
+    sec_type: 'CRYPTO',
+  },
+  {
+    key: 'PAXOS:ETH',
+    symbol: 'ETH',
+    exchange: 'PAXOS',
+    market: 'CRYPTO',
+    currency: 'USD',
+    board_lot: 0.001,
+    sec_type: 'CRYPTO',
+  },
+];
+
+export const IBKR_DAY_PLAN_VARIABLES = withDerivedAllowlistKeys({
+  markets: ['US', 'SG', 'CRYPTO'],
+  allowlist: SEED_ALLOWLIST.map((a) => ({ ...a })),
+  daily_budget_usd: 1000,
+  max_trades_per_day: 10,
+  checker_max_loops: 3,
+  min_rationale_chars: 80,
+  block_duplicate_buys: true,
+  require_live_cash: true,
+  max_hold_days: 5,
+  stop_pct_min: 1.5,
+  stop_pct_max: 2.0,
+  tp_pct_min: 0.5,
+  tp_pct_max: 2.0,
+  entry_slip_pct_max: 0.25,
+  no_margin: true,
+  sgd_usd_rate: 0.74,
+  brain_history_days: 7,
+});
+
+export const IBKR_POLLER_VARIABLES = withDerivedAllowlistKeys({
+  markets: ['US', 'SG', 'CRYPTO'],
+  allowlist: SEED_ALLOWLIST.map((a) => ({ ...a })),
+  daily_budget_usd: 1000,
+  max_trades_per_day: 10,
+  max_hold_days: 5,
+  max_hold_extension_days: 2,
+  on_review_fail: 'hold',
+  checker_max_loops: 3,
+  poll_interval_cron: '*/15 * * * *',
+  require_ceo_on_exit: false,
+  stop_pct_min: 1.5,
+  stop_pct_max: 2.0,
+  tp_pct_min: 0.5,
+  tp_pct_max: 2.0,
+  entry_slip_pct_max: 0.25,
+  no_margin: true,
+  sgd_usd_rate: 0.74,
+  brain_history_days: 7,
+});

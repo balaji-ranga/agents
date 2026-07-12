@@ -500,6 +500,23 @@ export function initDb() {
     _db.exec(`ALTER TABLE agent_workflow_definitions ADD COLUMN webhook_secret TEXT`);
   } catch (_) {}
   try {
+    _db.exec(`ALTER TABLE agent_workflow_definitions ADD COLUMN variables_json TEXT DEFAULT '{}'`);
+  } catch (_) {}
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS ibkr_position_meta (
+        owner_user_id TEXT NOT NULL,
+        symbol_key TEXT NOT NULL,
+        opened_at TEXT,
+        hold_until TEXT,
+        last_review_at TEXT,
+        last_review_json TEXT,
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (owner_user_id, symbol_key)
+      )
+    `);
+  } catch (_) {}
+  try {
     _db.exec(`ALTER TABLE agent_workflow_run_steps ADD COLUMN iteration INTEGER DEFAULT 1`);
   } catch (_) {}
   try {
@@ -743,6 +760,67 @@ export function initDb() {
   try {
     const legacyOwner = (process.env.AGENT_OS_BALA_CEO_ID || 'ceo-bala').trim() || 'ceo-bala';
     _db.prepare(`UPDATE content_tool_logs SET owner_user_id = ? WHERE owner_user_id IS NULL`).run(legacyOwner);
+  } catch (_) {}
+
+  try {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS ibkr_budget_days (
+        owner_user_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        budget_usd REAL NOT NULL,
+        reserved_usd REAL NOT NULL DEFAULT 0,
+        consumed_usd REAL NOT NULL DEFAULT 0,
+        trades_placed INTEGER NOT NULL DEFAULT 0,
+        residual_json TEXT DEFAULT '[]',
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (owner_user_id, day)
+      )
+    `);
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS ibkr_trade_reservations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        run_id INTEGER,
+        symbol_key TEXT NOT NULL,
+        side TEXT NOT NULL,
+        qty REAL NOT NULL,
+        notional_usd REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'reserved',
+        detail_json TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_ibkr_reservations_owner_day ON ibkr_trade_reservations(owner_user_id, day, status)`
+    );
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS ibkr_order_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_id TEXT NOT NULL,
+        reservation_id INTEGER,
+        run_id INTEGER,
+        symbol_key TEXT,
+        symbol TEXT,
+        side TEXT,
+        ib_order_id INTEGER,
+        status TEXT NOT NULL,
+        reason_code TEXT,
+        reason_text TEXT,
+        source TEXT,
+        error_code INTEGER,
+        qty REAL,
+        detail_json TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    _db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_ibkr_order_events_owner_created ON ibkr_order_events(owner_user_id, created_at DESC)`
+    );
+    _db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_ibkr_order_events_symbol ON ibkr_order_events(owner_user_id, symbol_key, created_at DESC)`
+    );
   } catch (_) {}
 
   return _db;

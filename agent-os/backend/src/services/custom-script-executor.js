@@ -4,22 +4,24 @@
 import { spawn } from 'child_process';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { DEFAULT_NODE_TIMEOUT_MS } from './agent-workflow-node-timeout.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SANDBOX_JS = join(__dirname, '../../scripts/custom-script-sandbox.mjs');
 const SANDBOX_PY = join(__dirname, '../../scripts/custom-script-sandbox.py');
 
-const TIMEOUT_MS = Number(process.env.CUSTOM_SCRIPT_TIMEOUT_MS) || 60000;
+const ENV_TIMEOUT_MS = Number(process.env.CUSTOM_SCRIPT_TIMEOUT_MS) || DEFAULT_NODE_TIMEOUT_MS;
 const PYTHON_BIN = process.env.CUSTOM_SCRIPT_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 const NODE_BIN = process.env.CUSTOM_SCRIPT_NODE || 'node';
 
-function runSubprocess(cmd, args, stdinPayload) {
+function runSubprocess(cmd, args, stdinPayload, timeoutMs) {
+  const effectiveTimeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : ENV_TIMEOUT_MS;
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        CUSTOM_SCRIPT_TIMEOUT_MS: String(TIMEOUT_MS),
+        CUSTOM_SCRIPT_TIMEOUT_MS: String(effectiveTimeout),
         PYTHONDONTWRITEBYTECODE: '1',
       },
       windowsHide: true,
@@ -43,8 +45,8 @@ function runSubprocess(cmd, args, stdinPayload) {
       } else {
         child.kill('SIGTERM');
       }
-      finish({ ok: false, error: `Script timed out after ${TIMEOUT_MS}ms` });
-    }, TIMEOUT_MS + 2000);
+      finish({ ok: false, error: `Script timed out after ${effectiveTimeout}ms` });
+    }, effectiveTimeout + 2000);
 
     child.stdout.on('data', (d) => {
       stdout += d.toString();
@@ -79,15 +81,16 @@ export async function runCustomScriptInSandbox({
   runtimeProfile = 'restricted',
   inputs = {},
   context = {},
+  timeoutMs,
 }) {
   const lang = String(language).toLowerCase();
   const payload = { source, inputs, context, runtimeProfile };
 
   if (lang === 'javascript' || lang === 'js') {
-    return runSubprocess(NODE_BIN, [SANDBOX_JS], payload);
+    return runSubprocess(NODE_BIN, [SANDBOX_JS], payload, timeoutMs);
   }
   if (lang === 'python') {
-    return runSubprocess(PYTHON_BIN, [SANDBOX_PY], payload);
+    return runSubprocess(PYTHON_BIN, [SANDBOX_PY], payload, timeoutMs);
   }
   return { ok: false, error: `Unsupported language: ${language}` };
 }

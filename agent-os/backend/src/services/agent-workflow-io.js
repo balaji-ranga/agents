@@ -48,12 +48,32 @@ function getOutputValue(context, nodeId, outputKey = 'text') {
   return String(raw);
 }
 
-/** Replace {{nodeId.outputKey}} bind variables (supports nested keys e.g. body.accessToken). */
+/** Replace {{nodeId.outputKey}} bind variables (supports nested keys e.g. body.accessToken).
+ * Also supports {{var.key}} / {{variables.key}} for workflow-level static variables.
+ */
 export function renderWorkflowTemplates(text, context) {
   if (text == null || text === '') return text;
-  let out = String(text).replace(/\{\{([\w-]+)\.([\w.-]+)\}\}/g, (_, nodeId, path) =>
-    getOutputValue(context, nodeId, path)
-  );
+  let out = String(text).replace(/\{\{var(?:iables)?\.([\w.-]+)\}\}/g, (_, path) => {
+    const vars = context.workflow_variables || context.variables || {};
+    const v = getNestedValue(vars, path);
+    return v === '' && vars[path] != null
+      ? typeof vars[path] === 'object'
+        ? JSON.stringify(vars[path])
+        : String(vars[path])
+      : v;
+  });
+  out = out.replace(/\{\{([\w-]+)\.([\w.-]+)\}\}/g, (_, nodeId, path) => {
+    if (nodeId === 'var' || nodeId === 'variables') {
+      const vars = context.workflow_variables || context.variables || {};
+      const v = getNestedValue(vars, path);
+      if (v !== '') return v;
+      if (vars[path] != null) {
+        return typeof vars[path] === 'object' ? JSON.stringify(vars[path]) : String(vars[path]);
+      }
+      return '';
+    }
+    return getOutputValue(context, nodeId, path);
+  });
   out = out.replace(/\{\{(\w+)\}\}/g, (match, key) => {
     if (key === 'input') {
       return context.initial_input != null ? String(context.initial_input) : match;
@@ -84,6 +104,15 @@ export function resolveNodeInputs(node, graph, context) {
     if (binding.mode === 'dynamic' && binding.sourceNodeId) {
       value = getOutputValue(context, binding.sourceNodeId, binding.sourceOutputKey || 'text');
       source = `step:${binding.sourceNodeId}.${binding.sourceOutputKey || 'text'}`;
+    } else if (binding.mode === 'workflow_variable' || binding.mode === 'variable') {
+      const vars = context.workflow_variables || context.variables || {};
+      const keyPath = binding.variableKey || binding.sourceOutputKey || binding.id;
+      const nested = getNestedValue(vars, keyPath);
+      if (nested !== '') value = nested;
+      else if (vars[keyPath] != null) {
+        value = typeof vars[keyPath] === 'object' ? JSON.stringify(vars[keyPath]) : String(vars[keyPath]);
+      } else value = '';
+      source = `var:${keyPath}`;
     } else if (binding.mode === 'dynamic') {
       const incoming = graph.edges.filter((e) => e.target === node.id);
       if (incoming.length === 1) {
@@ -98,6 +127,10 @@ export function resolveNodeInputs(node, graph, context) {
       }
     } else {
       value = binding.value != null ? String(binding.value) : '';
+      // Allow {{nodeId.key}} / {{var.key}} in static bindings (e.g. compose maker user message)
+      if (value.includes('{{')) {
+        value = renderWorkflowTemplates(value, context);
+      }
       source = 'static';
     }
 
